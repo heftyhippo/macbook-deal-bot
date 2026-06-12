@@ -1,0 +1,7 @@
+mercapi>=0.2
+pyyaml
+requests
+beautifulsoup4
+rich
+curl_cffi
+playwright>=1.40

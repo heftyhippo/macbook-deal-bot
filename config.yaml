@@ -1,0 +1,192 @@
+# ============================================================
+#  MacBook Deal Bot - configuration
+#  This is the ONLY file you should need to edit.
+#  Lines starting with # are comments and are ignored.
+# ============================================================
+
+telegram:
+  enabled: false          # set to true once you've added your token + chat_id below
+  bot_token: "PASTE-YOUR-BOT-TOKEN-HERE"
+  chat_id: "PASTE-YOUR-CHAT-ID-HERE"
+
+alerts:
+  # A Telegram alert fires when the ESTIMATED LANDED COST (item + proxy fee +
+  # shipping + UK VAT + courier fee, converted to GBP) is at least this %
+  # below the UK average for that model.
+  min_savings_pct: 35
+  # Extra "INCREDIBLE DEAL" flag at this level:
+  hot_savings_pct: 45
+  # If savings exceed this, the listing is suspicious (scam / box-only / mislabelled).
+  # It is still shown + alerted, but with a big warning.
+  too_good_pct: 55
+  # A whole MacBook never costs less than this fraction of its UK average -
+  # below it the listing is almost certainly a part (screen/board) or
+  # accessory, so it is flagged and never alerted. 0.30 = 30%. Lower this
+  # only if you ever see a real whole unit wrongly flagged.
+  implausible_price_ratio: 0.30
+  # Max battery charge cycles you accept for "opened but unused" machines.
+  # (Only enforced when the bot can actually find a cycle count in the listing text.)
+  max_battery_cycles: 10
+  # Re-alert on an already-alerted item only if its price drops by this % or more.
+  realert_drop_pct: 5
+
+costs:
+  # Proxy-service fee per item, in yen.
+  # ZenMarket: 800 yen for Mercari / auction items (2026). Buyee: 300-500 yen.
+  # 800 is used as the safe default so estimates err on the expensive side.
+  proxy_fee_jpy: 800
+  # Domestic shipping inside Japan (seller -> proxy warehouse).
+  # Mercari listings nearly always include domestic shipping; Yahoo often doesn't.
+  domestic_shipping_jpy:
+    mercari: 0
+    yahoo: 1200
+    rakuma: 0
+  # International courier (DHL/FedEx/UPS) for a boxed 14"/16" laptop, ~2-4 kg.
+  intl_shipping_jpy: 8000
+  # UK import charges. Laptops are 0% customs duty, but 20% import VAT applies
+  # to (item + shipping), plus a courier clearance/handling fee.
+  apply_uk_import: true
+  uk_vat_pct: 20
+  courier_handling_gbp: 12
+
+fx:
+  # Live JPY-per-GBP rate is fetched automatically (frankfurter.app, ECB data).
+  # This value is only used if the fetch fails.
+  fallback_jpy_per_gbp: 195
+
+scan:
+  # Marketplaces to scan. All are bought through Buyee AND ZenMarket, and the
+  # bot outputs purchase links for every find.
+  #   mercari = Mercari JP (huge C2C flea market, via official app API)
+  #   yahoo   = Yahoo! Auctions JP (via Buyee - Japan's biggest auction site)
+  #   rakuma  = Rakuten Rakuma (via Buyee - 2nd-biggest C2C flea market)
+  # Remove any you don't want; add back any time. Mercari is the most reliable;
+  # yahoo + rakuma go through Buyee's browser path (needs Playwright installed).
+  sources: [mercari, yahoo, rakuma]
+  # Search queries sent to the Japanese sites (sellers list in romaji, so these work).
+  queries:
+    - "MacBook Pro M2"
+    - "MacBook Pro M3"
+    - "MacBook Pro M4"
+    - "MacBook Pro M5"
+  # Mercari condition IDs to accept: 1 = brand new/unused, 2 = nearly unused.
+  # Keep [1, 2] to also catch "opened but never used / 2 charge cycles" listings.
+  mercari_conditions: [1, 2]
+  # Pages of Mercari results per query (about 120 items per page, newest first).
+  mercari_pages: 2
+  # Extra URL parameters for Yahoo Auctions search.
+  # istatus=2 = "unused" condition filter, n=50 results, s1=new&o1=d = newest first.
+  # If Yahoo ever changes things: do the search in your browser with the filters
+  # you want, and copy everything after the "?" from the address bar into here.
+  # Yahoo Auctions is reached VIA BUYEE: Yahoo! JAPAN geo-blocks all UK/EEA
+  # visitors, but Buyee mirrors its full catalogue and works from the UK.
+  buyee_extra_params: "translationType=98&istatus=2"
+  yahoo_extra_params: "istatus=2&n=50&s1=new&o1=d"   # legacy (direct access from outside UK/EEA)
+  # Rakuten Rakuma is also reached via Buyee. status=all returns on-sale items;
+  # the bot still insists the title says new/unused (same as for Yahoo).
+  rakuma_extra_params: "status=all&order=desc&sort=created_time"
+  # Ignore listings below this price (filters out boxes, stickers, chargers, junk).
+  min_price_jpy: 60000
+  # How many promising listings to open fully each scan to hunt for a battery
+  # cycle count in the description (slower, so capped).
+  max_detail_fetch: 12
+  # Minutes between scans in watch mode. Don't go below ~10: be polite to the sites.
+  watch_interval_minutes: 15
+
+filters:
+  # A listing containing any of these is skipped (junk / parts / box-only traps).
+  exclude_keywords:
+    - "ジャンク"          # junk
+    - "修理交換用"        # repair-REPLACEMENT part (e.g. a screen, not the Mac)
+    - "交換用"            # "for replacement" - parts/components
+    - "修理用"            # for repair
+    - "修理部品"          # repair part
+    - "換装用"            # for swapping in (component)
+    - "整備品"            # refurbished (seen in the wild as 整備品・未開封)
+    - "再整備"            # re-furbished
+    - "リファービッシュ"  # refurbished (katakana)
+    - "部品取り"          # for parts
+    - "部品"
+    - "天板"              # top case / lid panel only
+    - "液晶パネル"        # LCD panel (screen part)
+    - "パネルのみ"        # panel only
+    - "ディスプレイのみ"  # display only
+    - "箱のみ"            # BOX ONLY - classic trap
+    - "空箱"              # empty box
+    - "外箱のみ"
+    - "ケースのみ"        # case only
+    - "充電器のみ"        # charger only
+    - "ロジックボード"    # logic board (part)
+    - "マザーボード"      # motherboard (part)
+    - "トップケース"      # top case assembly (part)
+    - "ボトムケース"      # bottom case (part)
+    - "上半身"            # "upper half" = display assembly (parts trade term)
+    - "液晶のみ"          # LCD only
+    - "画面のみ"          # screen only
+    - "アダプタのみ"
+    - "画面割れ"          # cracked screen
+    - "液晶不良"          # bad LCD
+    - "ロジックボード"    # logic board (spare part listings)
+    - "キーボードのみ"
+    - "ステッカー"        # stickers
+    - "整備済"            # refurbished (not new/unused)
+    - "junk"
+    - "parts only"
+    - "for parts"
+    - "replacement"
+    - "box only"
+
+# ------------------------------------------------------------------
+# UK AVERAGE PRICES (GBP) for NEW / SEALED / OPENED-BUT-UNUSED units,
+# base configuration of each model. These are starting estimates
+# researched June 2026 - current-gen figures are anchored to real UK
+# retail prices; discontinued models are estimates of the going rate
+# for sealed/unused units on the UK secondhand market.
+#
+# Two ways to keep them accurate:
+#   1) run:  python macdeals.py ukprices        (auto-suggests medians
+#      from recent eBay UK SOLD listings, and  --write  saves them)
+#   2) just edit the numbers below by hand.
+# ------------------------------------------------------------------
+models:
+  - {id: m2pro-14,  chip: M2 PRO, size: 14, uk_avg_gbp: 1000, base_spec: "16GB/512GB",
+     ebay_query: "MacBook Pro 14 M2 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m2pro-16,  chip: M2 PRO, size: 16, uk_avg_gbp: 1300, base_spec: "16GB/512GB",
+     ebay_query: "MacBook Pro 16 M2 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m2max-14,  chip: M2 MAX, size: 14, uk_avg_gbp: 1600, base_spec: "32GB/1TB",
+     ebay_query: "MacBook Pro 14 M2 Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m2max-16,  chip: M2 MAX, size: 16, uk_avg_gbp: 1800, base_spec: "32GB/1TB",
+     ebay_query: "MacBook Pro 16 M2 Max -case -cover -box -faulty -spares -repair -damaged"}
+
+  - {id: m3-14,     chip: M3,     size: 14, uk_avg_gbp: 1050, base_spec: "8-16GB/512GB",
+     ebay_query: "MacBook Pro 14 M3 -Pro -Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m3pro-14,  chip: M3 PRO, size: 14, uk_avg_gbp: 1400, base_spec: "18GB/512GB",
+     ebay_query: "MacBook Pro 14 M3 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m3pro-16,  chip: M3 PRO, size: 16, uk_avg_gbp: 1750, base_spec: "18GB/512GB",
+     ebay_query: "MacBook Pro 16 M3 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m3max-14,  chip: M3 MAX, size: 14, uk_avg_gbp: 2200, base_spec: "36GB/1TB",
+     ebay_query: "MacBook Pro 14 M3 Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m3max-16,  chip: M3 MAX, size: 16, uk_avg_gbp: 2450, base_spec: "36GB/1TB",
+     ebay_query: "MacBook Pro 16 M3 Max -case -cover -box -faulty -spares -repair -damaged"}
+
+  - {id: m4-14,     chip: M4,     size: 14, uk_avg_gbp: 1250, base_spec: "16GB/512GB",
+     ebay_query: "MacBook Pro 14 M4 -Pro -Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m4pro-14,  chip: M4 PRO, size: 14, uk_avg_gbp: 1650, base_spec: "24GB/512GB",
+     ebay_query: "MacBook Pro 14 M4 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m4pro-16,  chip: M4 PRO, size: 16, uk_avg_gbp: 2050, base_spec: "24GB/512GB",
+     ebay_query: "MacBook Pro 16 M4 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m4max-14,  chip: M4 MAX, size: 14, uk_avg_gbp: 2600, base_spec: "36GB/1TB",
+     ebay_query: "MacBook Pro 14 M4 Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m4max-16,  chip: M4 MAX, size: 16, uk_avg_gbp: 2900, base_spec: "36GB/1TB",
+     ebay_query: "MacBook Pro 16 M4 Max -case -cover -box -faulty -spares -repair -damaged"}
+
+  - {id: m5-14,     chip: M5,     size: 14, uk_avg_gbp: 1350, base_spec: "16GB/512GB-1TB",
+     ebay_query: "MacBook Pro 14 M5 -Pro -Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m5pro-14,  chip: M5 PRO, size: 14, uk_avg_gbp: 1950, base_spec: "24GB/1TB",
+     ebay_query: "MacBook Pro 14 M5 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m5pro-16,  chip: M5 PRO, size: 16, uk_avg_gbp: 2450, base_spec: "24GB/1TB",
+     ebay_query: "MacBook Pro 16 M5 Pro -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m5max-14,  chip: M5 MAX, size: 14, uk_avg_gbp: 3400, base_spec: "36GB/2TB",
+     ebay_query: "MacBook Pro 14 M5 Max -case -cover -box -faulty -spares -repair -damaged"}
+  - {id: m5max-16,  chip: M5 MAX, size: 16, uk_avg_gbp: 3700, base_spec: "36GB/2TB",
+     ebay_query: "MacBook Pro 16 M5 Max -case -cover -box -faulty -spares -repair -damaged"}
