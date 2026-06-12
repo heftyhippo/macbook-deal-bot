@@ -1,0 +1,71 @@
+name: MacBook deal scan
+
+# Runs the deal scan automatically on GitHub's servers - no need for your own
+# computer to be on. Free for public repositories.
+on:
+  schedule:
+    # Every 20 minutes. (GitHub uses UTC and may delay a few minutes under load.)
+    # Want a different cadence? Change the number: "*/30 * * * *" = every 30 min,
+    # "0 * * * *" = once an hour. Don't go below 5 minutes.
+    - cron: "*/20 * * * *"
+  workflow_dispatch:   # adds a "Run workflow" button so you can test on demand
+
+# Allow the job to commit the dedupe database back to the repo so the bot
+# remembers what it already alerted you about between runs.
+permissions:
+  contents: write
+
+# Never let two scans run at the same time (they'd both edit the database).
+concurrency:
+  group: macdeals-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache the Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
+      - name: Install the headless browser (for Buyee)
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run the scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Optional override: set a repository Variable named SOURCES (e.g.
+          # "mercari") if Buyee blocks GitHub's servers and you want to silence
+          # the yahoo/rakuma failures. Leave unset to scan everything.
+          SOURCES: ${{ vars.SOURCES }}
+        run: python macdeals.py scan
+        continue-on-error: true   # a bad scan shouldn't kill the schedule
+
+      - name: Remember what was already alerted
+        if: always()              # run even if the scan above errored
+        run: |
+          date -u +"last cloud scan: %Y-%m-%d %H:%M UTC" > last_run.txt
+          git config user.name "macdeals-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f seen_items.db last_run.txt 2>/dev/null || true
+          git commit -m "Update dedupe DB + heartbeat [skip ci]" || echo "nothing to commit"
+          git pull --rebase --autostash || true
+          git push || echo "nothing to push"
