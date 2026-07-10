@@ -428,11 +428,26 @@ def _buyee_variants(cfg) -> list[tuple[str, str]]:
     condition filter can't be relied on, so each query is searched with the
     words Japanese sellers reliably put in titles: 未使用 (unused) / 新品
     (brand new) for the resale tier, plus 美品 (beautiful condition - catches
-    極美品/超美品 too) for the like-new tier."""
-    words = ["未使用", "新品"]
-    if cfg.get("personal", {}).get("enabled", True):
-        words.append("美品")
-    return [(f"{q} {w}", fam) for q, fam in scan_queries(cfg) for w in words]
+    極美品/超美品 too) for the like-new tier.
+
+    To keep the browser-path fetch count sane, high-volume families (MacBook,
+    iMac, iPads) search per query/with all words, while the slow-moving
+    desktop families use ONE broad search per family with two words - their
+    entire recent unused stock fits on the first page anyway."""
+    personal_on = cfg.get("personal", {}).get("enabled", True)
+    full = ["未使用", "新品"] + (["美品"] if personal_on else [])
+    out: list[tuple[str, str]] = []
+    seen_broad: set = set()
+    for q, fam in scan_queries(cfg):
+        if fam == "macbook" or fam.startswith("ipad"):
+            out += [(f"{q} {w}", fam) for w in full]
+        elif fam == "imac":
+            out += [(f"{q} {w}", fam) for w in ["未使用", "新品"]]
+        elif fam not in seen_broad:
+            seen_broad.add(fam)
+            bq = _BROAD_QUERY.get(fam, q)
+            out += [(f"{bq} {w}", fam) for w in ["未使用", "新品"]]
+    return out
 
 
 def scan_yahoo(cfg, debug: bool = False) -> list[Listing]:
@@ -454,6 +469,7 @@ def scan_yahoo(cfg, debug: bool = False) -> list[Listing]:
               "                python3 -m pip install playwright\n"
               "                python3 -m playwright install chromium")
     extra = s.get("buyee_extra_params", "translationType=98&istatus=2")
+    any_anchors = False
     for i, (q, fam) in enumerate(_buyee_variants(cfg)):
         min_jpy = min_price_for(cfg, fam, "jpy")
         url = f"https://buyee.jp/item/search/query/{quote(q)}?{extra}"
@@ -519,14 +535,18 @@ def scan_yahoo(cfg, debug: bool = False) -> list[Listing]:
                 grade=grade,
             )
             found_here += 1
-        if not anchors:
-            print(f"  [yahoo/buyee] 0 items parsed for '{q}' - Buyee may have "
-                  f"changed its page layout. Run with --debug and send the "
-                  f"debug_buyee_*.html file to Claude.")
-        elif debug:
+        if anchors:
+            any_anchors = True
+        if debug:
             print(f"  [yahoo/buyee] '{q}': {len(anchors)} cards on page, "
                   f"{found_here} passed the new/unused title check")
         time.sleep(1.5)
+    if not any_anchors and out is not None:
+        # a niche query with genuinely no listings is normal; EVERY query
+        # coming back empty means layout change or a block
+        print("  [yahoo/buyee] 0 items parsed across every search - Buyee may "
+              "have changed its page layout or blocked this address. Run "
+              "with --debug and send the debug_buyee_*.html files to Claude.")
     return list(out.values())
 
 
@@ -665,6 +685,7 @@ def scan_rakuma(cfg, debug: bool = False) -> list[Listing]:
         print("  [rakuma/buyee] WARNING: Playwright is not installed - Rakuma "
               "needs the browser path. Install it (see the Yahoo note above).")
     extra = s.get("rakuma_extra_params", "status=on_sale")
+    any_anchors = False
     for i, (q, fam) in enumerate(_buyee_variants(cfg)):
         min_jpy = min_price_for(cfg, fam, "jpy")
         url = f"https://buyee.jp/rakuma/search?keyword={quote(q)}&{extra}"
@@ -726,14 +747,16 @@ def scan_rakuma(cfg, debug: bool = False) -> list[Listing]:
                 grade=grade,
             )
             found_here += 1
-        if not anchors:
-            print(f"  [rakuma/buyee] 0 items parsed for '{q}' - Buyee's Rakuma "
-                  f"layout may have changed. Run with --debug and send the "
-                  f"debug_rakuma_*.html file to Claude.")
-        elif debug:
+        if anchors:
+            any_anchors = True
+        if debug:
             print(f"  [rakuma/buyee] '{q}': {len(anchors)} cards on page, "
                   f"{found_here} passed the new/unused title check")
         time.sleep(1.5)
+    if not any_anchors:
+        print("  [rakuma/buyee] 0 items parsed across every search - Buyee's "
+              "Rakuma layout may have changed or the address is blocked. Run "
+              "with --debug and send the debug_rakuma_*.html files to Claude.")
     return list(out.values())
 
 
@@ -767,6 +790,7 @@ def scan_paypay(cfg, debug: bool = False) -> list[Listing]:
         print("  [paypay/buyee] WARNING: Playwright is not installed - PayPay "
               "needs the browser path. Install it (see the Yahoo note above).")
     extra = cfg["scan"].get("paypay_extra_params", "")
+    any_anchors = False
     for i, (q, fam) in enumerate(_buyee_variants(cfg)):
         min_jpy = min_price_for(cfg, fam, "jpy")
         url = f"https://buyee.jp/paypayfleamarket/search?keyword={quote(q)}"
@@ -830,14 +854,16 @@ def scan_paypay(cfg, debug: bool = False) -> list[Listing]:
                 grade=grade,
             )
             found_here += 1
-        if not anchors:
-            print(f"  [paypay/buyee] 0 items parsed for '{q}' - Buyee's PayPay "
-                  f"layout may have changed. Run with --debug and send the "
-                  f"debug_paypay_*.html file to Claude.")
-        elif debug:
+        if anchors:
+            any_anchors = True
+        if debug:
             print(f"  [paypay/buyee] '{q}': {len(anchors)} cards on page, "
                   f"{found_here} passed the new/unused title check")
         time.sleep(1.5)
+    if not any_anchors:
+        print("  [paypay/buyee] 0 items parsed across every search - Buyee's "
+              "PayPay layout may have changed or the address is blocked. Run "
+              "with --debug and send the debug_paypay_*.html files to Claude.")
     return list(out.values())
 
 
@@ -998,13 +1024,17 @@ def _ebay_pass(cfg, source: str, extra: str, mode: str,
     home = f"https://{domain}/"
     personal_on = cfg.get("personal", {}).get("enabled", True)
     value_on = cfg.get("value", {}).get("enabled", True)
+    any_cards = False
     for q, fam in scan_queries(cfg):
         min_price = min_price_for(cfg, fam, site["cur_key"])
         url = (f"https://{domain}/sch/i.html?_nkw=" + quote(q)
                + "&_udlo=" + str(min_price) + "&" + extra)
         cards, html, fetch_failed = [], "", False
         # eBay sometimes answers a burst of requests with a card-less
-        # interstitial page; one retry after a pause clears it.
+        # interstitial page; one retry after a pause clears it. A FULL page
+        # with zero cards is just a niche query with no listings right now
+        # (e.g. Mac Pro M2 Ultra) - real result pages are ~1MB even when
+        # empty, interstitials are tiny, so don't waste a retry on those.
         for attempt in (1, 2):
             try:
                 html = _http_get(url, referer=home, warmup=home,
@@ -1025,7 +1055,7 @@ def _ebay_pass(cfg, source: str, extra: str, mode: str,
             if cut:
                 html = html[:cut.start()]
             cards = _ebay_result_cards(BeautifulSoup(html, "html.parser"))
-            if cards or attempt == 2:
+            if cards or attempt == 2 or len(html) > 150_000:
                 break
             time.sleep(4.0)
         if fetch_failed:
@@ -1089,14 +1119,19 @@ def _ebay_pass(cfg, source: str, extra: str, mode: str,
             if "best offer" in low or "preisvorschlag" in low:
                 out[item_id].best_offer = True
             found_here += 1
-        if not cards:
-            print(f"  [{source}] 0 result cards for '{q}' ({mode} pass) - "
-                  f"eBay may have changed its page layout. Run with --debug "
-                  f"and send the debug_{source}_*.html file to Claude.")
-        elif debug:
+        if cards:
+            any_cards = True
+        if debug:
             print(f"  [{source}] '{q}' ({mode}): {len(cards)} cards on page, "
                   f"{found_here} usable")
-        time.sleep(1.5)
+        time.sleep(1.2)
+    if not any_cards:
+        # a niche query with no listings is normal; EVERY query coming back
+        # empty means a layout change or a block
+        print(f"  [{source}] no result cards for ANY query ({mode} pass) - "
+              f"eBay may have changed its page layout or blocked this "
+              f"address. Run with --debug and send the debug_{source}_*.html "
+              f"files to Claude.")
 
 
 def fetch_ebay_us_cycles(item_id: str) -> Optional[int]:
@@ -1232,7 +1267,7 @@ def scan_craigslist(cfg, debug: bool = False) -> list[Listing]:
             if debug:
                 print(f"  [craigslist] {city} '{q}': {len(results)} results, "
                       f"{found_here} usable")
-            time.sleep(1.2)
+            time.sleep(1.0)
     return list(out.values())
 
 
@@ -1248,13 +1283,16 @@ def scan_gumtree(cfg, debug: bool = False) -> list[Listing]:
     can be the best flips of all (no import costs), but there's no buyer
     protection: meet the seller, test the machine, pay on collection."""
     out: dict[str, Listing] = {}
-    # Gumtree rate-limits after ~5 quick searches. Rotate the starting
-    # family each scan and STOP at the first rate-limit, so consecutive
-    # scans between them cover every family without burning the window.
+    # Gumtree rate-limits after ~5 quick searches, so stay UNDER the limit:
+    # 4 broad family searches per scan, with the window rotating forward by
+    # 4 each ~20 minutes - every family is covered across two consecutive
+    # scans and the limiter never trips. (Belt and braces: still stop early
+    # if a rate-limit response does appear.)
     qs = _broad_queries(cfg)
     if qs:
-        start = int(time.time() // 900) % len(qs)
-        qs = qs[start:] + qs[:start]
+        take = min(4, len(qs))
+        start = (int(time.time() // 1200) * take) % len(qs)
+        qs = (qs + qs)[start:start + take]
     for q, fam in qs:
         min_gbp = min_price_for(cfg, fam, "gbp")
         url = ("https://www.gumtree.com/search?search_category=all&q="

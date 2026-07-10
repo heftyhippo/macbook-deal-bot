@@ -50,11 +50,13 @@ def console_table(listings: list[Listing], best_value: list[Listing],
         tab.add_column("UK avg", justify="right", no_wrap=True)
         tab.add_column("Title / flags", overflow="fold", ratio=3)
         for l in group:
-            spec = "/".join(x for x in [
-                f"{l.ram_gb}GB" if l.ram_gb else "?",
-                (f"{l.storage_gb // 1024}TB" if l.storage_gb and l.storage_gb >= 1024
-                 else (f"{l.storage_gb}GB" if l.storage_gb else "?")),
-            ])
+            stor = (f"{l.storage_gb // 1024}TB" if l.storage_gb and l.storage_gb >= 1024
+                    else (f"{l.storage_gb}GB" if l.storage_gb else "?"))
+            # iPads/displays never state RAM - showing "?/" is just noise
+            if l.family in ("ipad_pro", "ipad_air", "display"):
+                spec = stor
+            else:
+                spec = f"{l.ram_gb}GB/{stor}" if l.ram_gb else f"?/{stor}"
             flags = ("  [yellow]" + "; ".join(l.flags) + "[/yellow]") if l.flags else ""
             save = f"{l.savings_pct:+.0f}%"
             profit = (f"£{l.flip_profit_gbp:,.0f}"
@@ -280,6 +282,8 @@ footer{max-width:1280px;margin:18px auto 0;padding:0 18px 30px;
     <label><input type="checkbox" id="fjis"> hide JIS keyboards</label>
     <label><input type="checkbox" id="fauction"> hide auctions</label>
     <label><input type="checkbox" id="falert"> alert-worthy only</label>
+    <label title="show each model's best few listings, so rare products aren't buried by the overall ranking">
+      <input type="checkbox" id="fbest"> top 3 per model</label>
   </div>
   <div class="tablewrap"><table>
     <thead id="thead"></thead><tbody id="tbody"></tbody>
@@ -442,6 +446,10 @@ function rows(){
       return (typeof x==="string"?x.localeCompare(y):x-y)*sortDir;
     });
   }
+  if($("#fbest").checked){
+    const n={};
+    it=it.filter(r=>(n[r.model]=(n[r.model]||0)+1)<=3);
+  }
   return it;
 }
 function render(){
@@ -479,7 +487,7 @@ function meta(){
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   tab=b.dataset.tab;location.hash=tab;sortKey=null;sortDir=-1;render();
 });
-["q","ffam","fmodel","fmarket","fjis","fauction","falert"].forEach(id=>
+["q","ffam","fmodel","fmarket","fjis","fauction","falert","fbest"].forEach(id=>
   $("#"+id).addEventListener("input",render));
 const models=[...new Set(DATA.items.map(r=>r.model))].sort();
 $("#fmodel").innerHTML+=models.map(m=>"<option>"+esc(m)+"</option>").join("");
@@ -523,11 +531,12 @@ def whatsapp_message(l: Listing, cfg: dict) -> str:
            "yahoo": "Yahoo 🇯🇵", "rakuma": "Rakuma 🇯🇵",
            "paypay": "PayPay 🇯🇵", "ebay_uk": "eBay UK 🇬🇧",
            "gumtree": "Gumtree 🇬🇧", "ebay_de": "eBay DE 🇩🇪"}.get(l.source, l.source)
-    spec_bits = [
-        f"{l.ram_gb}GB" if l.ram_gb else None,
-        (f"{l.storage_gb // 1024}TB" if l.storage_gb and l.storage_gb >= 1024
-         else (f"{l.storage_gb}GB" if l.storage_gb else None)),
-    ]
+    spec_bits = []
+    if l.family not in ("ipad_pro", "ipad_air", "display"):
+        spec_bits.append(f"{l.ram_gb}GB" if l.ram_gb else None)
+    spec_bits.append(
+        f"{l.storage_gb // 1024}TB" if l.storage_gb and l.storage_gb >= 1024
+        else (f"{l.storage_gb}GB" if l.storage_gb else None))
     if l.family in pricing.KEYBOARD_FAMILIES:
         spec_bits.append(f"kbd {l.keyboard}")
     spec = " / ".join(x for x in spec_bits if x) or "spec not stated"

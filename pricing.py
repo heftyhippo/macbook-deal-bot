@@ -263,6 +263,35 @@ _ACCESSORY_LEAD_RE = re.compile(
     r"SMART\s+FOLIO|FOLIO|CASE|COVER|HÜLLE|SLEEVE|SKIN|STAND|DOCK|MOUSE|"
     r"TRACKPAD|CHARGER|NETZTEIL|LADEGERÄT)\b")
 
+# iPad/display listings that are really an ACCESSORY named after the device
+# ("11インチiPad Pro（M5）用Magic Keyboard", "Logitech Combo Touch iPad Air
+# 13 Keyboard Case", "Bosstab floor stand iPad Pro 13") - an accessory noun
+# with NO bundle marker means the accessory IS the item. Bundles ("iPad Pro
+# + Magic Keyboard", "128GB／Apple Pencil付", "ケース付き") stay in.
+_ACC_NOUN_IPAD_RE = re.compile(
+    r"MAGIC\s*KEYBOARD|SMART\s*KEYBOARD|KEYBOARD\s*(?:CASE|COVER|FOLIO)|"
+    r"COMBO\s*TOUCH|APPLE\s*PENCIL|SMART\s*(?:FOLIO|COVER)|SCREEN\s*PROTECT|"
+    r"\bSTAND\b|TRACKPAD|キーボード|ペンシル|ケース|カバー|フィルム|"
+    r"スタンド|フォリオ|充電器")
+_ACC_NOUN_DISPLAY_RE = re.compile(
+    r"FLOOR\s*STAND|DESK\s*STAND|WALL\s*MOUNT|VESA|MOUNT\s*ADAPTER|"
+    r"スタンドのみ|マウント")
+_BUNDLE_MARK_RE = re.compile(
+    r"セット|付き|付属|付|同梱|おまけ|本体|INCLUDED|INCLUDES|\bWITH\b|"
+    r"[＋+＆&]")
+
+
+def _is_accessory_only(t: str, fam: str) -> bool:
+    """True when an iPad/display-family title is selling an accessory rather
+    than the device (accessory noun present, no bundle marker)."""
+    if fam in ("ipad_pro", "ipad_air"):
+        rx = _ACC_NOUN_IPAD_RE
+    elif fam == "display":
+        rx = _ACC_NOUN_DISPLAY_RE
+    else:
+        return False    # MacBook/iMac titles legitimately mention keyboards
+    return bool(rx.search(t)) and not _BUNDLE_MARK_RE.search(t)
+
 
 def _detect_family(t: str) -> str:
     """Product family from a normalised title; '' = not a product we track."""
@@ -301,6 +330,8 @@ def parse_listing_specs(listing: Listing) -> None:
     fam = _detect_family(t)
     if not fam:
         return
+    if _is_accessory_only(t, fam):
+        return    # a keyboard/case/pencil/stand named after the device
 
     # --- chip --------------------------------------------------------------
     chip = ""

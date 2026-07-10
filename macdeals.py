@@ -216,11 +216,28 @@ def run_scan(cfg: dict, send_alerts: bool, debug: bool, demo: bool,
         best_value.sort(key=lambda x: x.value_pct, reverse=True)
         best_value = best_value[:int(v.get("top_n", 100))]
 
-    # output - best 30 of each tier so neither crowds the other out
+    # console output - best 30 of each tier so neither crowds the other out
     top = ([l for l in matched if l.grade == "resale"][:30]
            + [l for l in matched if l.grade == "personal"][:30])
     report.console_table(top, best_value, rates, fx_note, cfg)
-    report.write_html(top, best_value, "deals.html", rates, cfg)
+    # dashboard - the overall best PLUS the best few of EVERY model, so a
+    # rare product (Studio Display, Mac Pro, ...) stays visible even when
+    # MacBooks dominate the top of the ranking. MacBooks whose stated cycle
+    # count busts the tier ceiling aren't near-new - keep them off entirely
+    # (they were already barred from alerting).
+    flips = [l for l in matched
+             if l.grade in ("resale", "personal")
+             and not (l.family == "macbook" and l.cycles is not None
+                      and l.cycles > pricing.max_cycles_for(l.grade, cfg))]
+    dash, per_model = [], {}
+    for l in flips:                      # sorted by savings desc already
+        n = per_model.get(l.model_id, 0)
+        if len(dash) < 150 or n < 8:
+            dash.append(l)
+            per_model[l.model_id] = n + 1
+        if len(dash) >= 450:
+            break
+    report.write_html(dash, best_value, "deals.html", rates, cfg)
     n_res = sum(1 for l in matched if l.grade == "resale")
     n_per = sum(1 for l in matched if l.grade == "personal")
     n_good = len(matched) - n_res - n_per
@@ -643,6 +660,24 @@ def run_selftest() -> int:
         lf = pricing.Listing("t", "mercari", title, 1)
         pricing.parse_listing_specs(lf)
         check(f"out of scope: '{title[:30]}'", lf.family == "" or lf.model_id is None)
+    # ---- accessory-vs-bundle detection (titles that leaked in live scans) --
+    for title in (
+            "Apple 11インチiPad Pro（M5）用Magic Keyboard - 日本語 - ブラック",
+            "【新品】Apple 13インチiPad Air(M2)用Magic Keyboard - 日本語",
+            "IPORT 非接触充電プロテクトケース 13インチiPad Air (M3 (2025年モデル)) 対応",
+            "Bosstab E06 ELITE EVO FLOOR STAND BLACK IPAD PRO 13IN M4",
+            "Logitech Combo Touch iPad Air 13-inch (M2)(2024) Keyboard Case"):
+        la = pricing.Listing("t", "mercari", title, 60000)
+        pricing.parse_listing_specs(la)
+        check(f"accessory rejected: '{title[:44]}'", la.family == "")
+    for title in (
+            "iPad Pro 12.9 第6世代 128GB／Apple Pencil付",
+            "iPad Pro 本体 第6世代 M2 ケース ガラスフィルム 付き",
+            "iPad Pro 13 M4 256GB + Magic Keyboard セット 新品",
+            "iPad Air 13 M2 128GB with Smart Folio included"):
+        lb = pricing.Listing("t", "mercari", title, 90000)
+        pricing.parse_listing_specs(lb)
+        check(f"bundle kept: '{title[:44]}'", lb.family in ("ipad_pro", "ipad_air"))
     lmp = pricing.Listing("t", "ebay_uk", "Apple Mac Pro M2 Ultra", 3000, currency="GBP")
     pricing.parse_listing_specs(lmp)
     check("'Mac Pro' not confused with 'MacBook Pro'", lmp.family == "mac_pro")
@@ -663,6 +698,11 @@ def run_selftest() -> int:
           and sources._en_grade("Mac mini M4 good condition") is None)
     check("eBay.de price format parsed (EUR 1.234,56)",
           sources._first_price_in("EUR 1.234,56", "EUR") == 1234.56)
+    nv = len(sources._buyee_variants(cfg))
+    check(f"Buyee search count consolidated ({nv} searches/source, was 42)",
+          nv <= 34)
+    check("classifieds use one broad query per family",
+          len(sources._broad_queries(cfg)) == 8)
 
     rates = {"JPY": 195.0, "USD": 1.30, "GBP": 1.0, "EUR": 1.17}
 
