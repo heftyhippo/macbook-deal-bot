@@ -1,4 +1,4 @@
-name: MacBook deal scan
+name: Apple deal scan
 
 # Runs the deal scan automatically on GitHub's servers - no need for your own
 # computer to be on. Free for public repositories. Each run:
@@ -70,12 +70,12 @@ jobs:
         env:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
-          # Swappa can't run in the cloud (needs a real Chrome on a home
-          # connection), so it's excluded here; your local scans cover it.
-          # Override with a repository Variable named SOURCES (e.g.
-          # "mercari,ebay_uk,ebay_us") if Buyee blocks GitHub's servers and
-          # you want to silence the failing sources.
-          SOURCES: ${{ vars.SOURCES || 'mercari,ebay_uk,ebay_us,yahoo,rakuma' }}
+          # Swappa, Craigslist and Gumtree can't run reliably from a cloud
+          # datacenter (bot walls / rate limits), so they're excluded here;
+          # your local scans cover them. Override with a repository Variable
+          # named SOURCES (e.g. "mercari,ebay_uk,ebay_us,ebay_de") if Buyee
+          # blocks GitHub's servers and you want to silence failing sources.
+          SOURCES: ${{ vars.SOURCES || 'mercari,ebay_uk,ebay_us,ebay_de,yahoo,rakuma,paypay' }}
         run: python macdeals.py scan
         continue-on-error: true   # a bad scan shouldn't kill the schedule
 
