@@ -33,10 +33,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Get the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -47,7 +47,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Cache the Playwright browser
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}
@@ -60,7 +60,7 @@ jobs:
       # the repo's history with commits. Each run saves a fresh copy; the
       # restore step below picks up the most recent one.
       - name: Remember what was already alerted (restore)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: seen_items.db
           key: seen-items-${{ github.run_id }}
@@ -81,7 +81,7 @@ jobs:
 
       - name: Remember what was already alerted (save)
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: seen_items.db
           key: seen-items-${{ github.run_id }}
@@ -102,15 +102,15 @@ jobs:
 
       - name: Configure Pages
         if: steps.collect.outputs.ok == 'true'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload the dashboard
         if: steps.collect.outputs.ok == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
       - name: Deploy to GitHub Pages
         if: steps.collect.outputs.ok == 'true'
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
