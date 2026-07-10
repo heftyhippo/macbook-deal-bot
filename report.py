@@ -264,6 +264,7 @@ footer{max-width:1280px;margin:18px auto 0;padding:0 18px 30px;
   <nav id="tabs">
     <button data-tab="me">🎯 Buy for myself</button>
     <button data-tab="flip">💰 Resell for profit</button>
+    <button data-tab="sav">💸 Biggest savings</button>
   </nav>
   <div class="meta" id="meta"></div>
 </header>
@@ -306,7 +307,7 @@ const MARKET={mercari:"🇯🇵 Mercari",yahoo:"🇯🇵 Yahoo Auctions",
 const GRADE={resale:"New / unused",personal:"Like new",good:"Good"};
 
 let tab=(location.hash||"").replace("#","");
-if(tab!=="me"&&tab!=="flip")tab="me";
+if(tab!=="me"&&tab!=="flip"&&tab!=="sav")tab="me";
 let sortKey=null,sortDir=-1;
 
 /* ---- NEW-since-last-visit badges (localStorage) ---- */
@@ -360,6 +361,11 @@ function profitCell(r){
       :"£"+r.profit.toLocaleString("en-GB")))+'</span>'+
     (roi!=null?'<div class="sub">'+roi+'% ROI · save '+Math.round(r.save)+'%</div>':"");
 }
+function saveCell(r){
+  return '<span class="big '+dealCls(r.save,35,20)+'">'+
+    (r.save>0?Math.round(r.save)+"% off":"+"+Math.abs(Math.round(r.save))+"% over")
+    +'</span><div class="sub">vs UK avg '+fmt(r.ukavg)+'</div>';
+}
 function linksCell(r){
   return (r.links||[]).map(x=>'<a class="btn" target="_blank" rel="noopener" href="'
     +esc(x[1])+'">'+esc(x[0])+"</a>").join("");
@@ -388,6 +394,18 @@ const COLS={
   {l:"UK resale value",s:r=>r.ukavg,
    c:r=>'<span class="money">'+fmt(r.ukavg)+'</span><div class="sub">avg. for new</div>'},
   {l:"Buy",s:null,c:linksCell},
+ ],
+ sav:[
+  {l:"Saving",s:r=>r.save,c:saveCell},
+  {l:"Machine",s:r=>r.model,c:machineCell},
+  {l:"Condition",s:r=>r.cycles??9999,c:condCell},
+  {l:"Market",s:r=>r.src,c:r=>'<span class="mkt">'+(MARKET[r.src]||r.src)+'</span>'},
+  {l:"Price",s:r=>r.landed,c:priceCell},
+  {l:"Landed cost",s:r=>r.landed,
+   c:r=>'<span class="big money">'+fmt(r.landed)+'</span><div class="sub">to your door</div>'},
+  {l:"UK avg (new)",s:r=>r.ukavg,
+   c:r=>'<span class="money">'+fmt(r.ukavg)+'</span>'},
+  {l:"Buy",s:null,c:linksCell},
  ]
 };
 const EXPLAIN={
@@ -396,14 +414,21 @@ const EXPLAIN={
     "sits below the fair UK price for that model in that condition.",
  flip:"New / unused stock only: what you'd make buying at the landed cost and "+
     "reselling at the UK average (minus "+DATA.friction+"% selling friction). "+
-    "Check the flags — an auction bid or a too-good price needs extra care."
+    "Check the flags — an auction bid or a too-good price needs extra care.",
+ sav:"New / unused and like-new machines ranked by the raw saving: landed "+
+    "cost vs the UK average price of a NEW unit. This is the exact number "+
+    "your WhatsApp alerts fire on (★ = clears the bar: UK/US "+DATA.bars.uk+
+    "%+, JP "+DATA.bars.jp+"%+)."
 };
 
 /* ---- filtering + rendering ---- */
 function baseRows(){
-  return tab==="me"
-    ? DATA.items.filter(r=>r.me!=null).sort((a,b)=>a.me-b.me)
-    : DATA.items.filter(r=>r.grade==="resale").sort((a,b)=>(b.profit??-9e9)-(a.profit??-9e9));
+  if(tab==="me")
+    return DATA.items.filter(r=>r.me!=null).sort((a,b)=>a.me-b.me);
+  if(tab==="flip")
+    return DATA.items.filter(r=>r.grade==="resale").sort((a,b)=>(b.profit??-9e9)-(a.profit??-9e9));
+  return DATA.items.filter(r=>r.grade==="resale"||r.grade==="personal")
+    .sort((a,b)=>b.save-a.save);
 }
 function rows(){
   const q=$("#q").value.trim().toLowerCase();
