@@ -1,25 +1,23 @@
 # Apple Deal Bot 🍏 — Japan · US · UK · EU
 
-Scans **ten markets** — Mercari Japan, Yahoo! Auctions, Rakuma and PayPay
+Scans **nine markets** — Mercari Japan, Yahoo! Auctions, Rakuma and PayPay
 Flea Market (the marketplaces behind Buyee/ZenMarket), eBay US, Swappa,
-Craigslist, eBay UK, Gumtree and eBay Germany — for **near-new Apple
-hardware to resell at a profit**:
+eBay UK, Gumtree and eBay Germany — for the **best-priced Apple
+hardware in every sound condition**:
 
 - **MacBook Pro** 14"/16" (M2 Pro generation onwards)
 - **Mac mini** (M2/M4 gens), **Mac Studio** (all gens), **iMac 24"**
   (M3/M4), **Mac Pro** (M2 Ultra)
 - **Apple Studio Display**
-- **iPad Pro** (M2/M4/M5) and **iPad Air** (the 2022+ models that average
-  over ~£500)
 
-Only **near-new stock** qualifies: new/unused (resale-grade) or like-new
-with zero visible wear. For every listing it estimates the **full landed
-cost in GBP** (item + proxy/forwarder fees + shipping scaled to the product
-+ UK import VAT where applicable), compares it against the UK going rate,
-and surfaces the best finds — as **WhatsApp alerts** and on a **dashboard
-website** with two views: **Best flips** (ranked by estimated resale profit
-with ROI) and **Biggest savings** (ranked by the raw %-below-UK-average the
-alerts fire on).
+For every listing it estimates the **full landed cost in GBP** (item +
+proxy/forwarder fees + product-sized shipping + UK import VAT where
+applicable) and a condition/spec/layout-aware **expected UK price**. New,
+open-box, like-new and sound used products then share one ranking: how many
+pounds and what percentage the all-in cost sits below that expected price.
+The same number drives the dashboard, CSV and **WhatsApp alerts**. A secondary
+confidence-weighted score makes risky classifieds, uncertain model matches and
+thin benchmark data visible without hiding an exceptional lead.
 
 The dashboard is written to `deals.html` after every local scan — and if you
 follow **`CLOUD_SETUP.md`** (recommended, ~20 min once), GitHub's servers run
@@ -31,9 +29,9 @@ you can open from **any device, any time**, with your computer off.
 > scraping it requires an account session, breaches its terms and gets
 > accounts banned. OfferUp blocks all automated access outright and Mercari
 > US captchas every request. Vinted's electronics section needs a rotating
-> app session and stocks very few Macs. Craigslist and Gumtree made the cut
-> instead as the classifieds sources — with the caveat that classifieds have
-> **no buyer protection** and are mostly local-pickup: treat those finds as
+> app session and stocks very few Macs. Gumtree made the cut as the UK
+> classifieds source — with the caveat that classifieds have **no buyer
+> protection** and are mostly local-pickup: treat those finds as
 > leads to follow up, not one-click buys.
 
 > **How Yahoo Auctions is reached:** Yahoo! JAPAN has geo-blocked all visitors
@@ -45,8 +43,8 @@ you can open from **any device, any time**, with your computer off.
 
 > **eBay UK is scanned too:** domestic listings have no import VAT, no
 > international shipping risk, UK (ISO) keyboards and UK returns — an
-> underpriced UK listing beats an import every time, and they dominate the
-> Best value tab for exactly that reason.
+> underpriced UK listing beats an import every time, and they often dominate
+> the unified deal ranking for exactly that reason.
 
 > **Which US markets and why:** every big US resale marketplace was evaluated
 > (July 2026). **eBay US** is the main hunting ground — by far the largest
@@ -138,13 +136,16 @@ account, no card, one-time 2-minute setup:
    `I allow callmebot to send me messages`
 3. Within a couple of minutes it replies with your personal **apikey**
    (a number like `123456`). Copy it.
-4. Open `config.yaml` (in the bot folder) with TextEdit and fill in:
+4. Create `config.local.yaml` beside `config.yaml` and put only this in it:
    ```yaml
    whatsapp:
      enabled: true
      phone: "+447712345678"   # YOUR WhatsApp number, with country code
      apikey: "123456"
    ```
+   This file is ignored by Git and should stay private; `config.yaml` contains
+   publish-safe placeholders. This project copy has already been migrated to
+   that layout.
 5. Test it:
    ```
    python macdeals.py test-whatsapp
@@ -176,10 +177,10 @@ all cost money. CallMeBot's WhatsApp API is free and works from anywhere.)
 | Check the bot's logic is healthy | `python macdeals.py selftest` |
 
 Every scan also writes **`deals.html`** in the bot folder — double-click it to
-open the dashboard in your browser: the **Buy for myself** and **Resell for
-profit** views, with search, filters, sortable columns and clickable
-Buyee / ZenMarket / eBay / Swappa links for every deal found. (The cloud setup
-publishes this same dashboard as a website — see `CLOUD_SETUP.md`.)
+open the dashboard in your browser. It has one ranked **Best Apple deals**
+list, simple search/product/market/condition filters, optional confidence and
+keyboard controls, and direct Buyee / ZenMarket / marketplace links. The cloud
+setup publishes this same dashboard as a website — see `CLOUD_SETUP.md`.
 
 ### Background mode in practice — built to WIN deals, not just see them
 
@@ -187,9 +188,13 @@ Great deals last **minutes**. Watch mode is therefore built around speed:
 
 - **Two cadences.** A full scan of every source runs every
   `watch_interval_minutes` (default 20), and in between the bot re-checks
-  just the cheap, fast markets (`fast_sources`: Mercari + both eBays) every
+  just the cheap, fast markets (`fast_sources`: Mercari + eBay UK) every
   `fast_interval_minutes` (default 5). A fresh Mercari or eBay bargain is
   spotted within ~5 minutes of being listed.
+- **Last-good source snapshots.** A quick pass updates those fast sources and
+  merges them with the last successful results from every other market. A
+  blocked marketplace or five-minute pass can no longer make most of the
+  dashboard disappear; retained results are clearly marked with their age.
 - **Alerts fire per source, immediately.** The moment one market's listings
   are processed, qualifying deals go to your WhatsApp — a Mercari find never
   waits for Swappa's browser to finish the scan.
@@ -226,69 +231,39 @@ are still the only way to cover Swappa.
 
 ## 3. What the dashboard shows
 
-`deals.html` has **two views**, both resale-first:
+`deals.html` has one decision surface: **Best Apple deals**. Every buyable
+result is sorted by the same headline metric:
 
-- **💰 Best flips** — every near-new find (new/unused *or* like-new), ranked
-  by **estimated resale profit**: sell at the UK going rate for its
-  condition (new stock at the UK average, like-new stock at like-new money),
-  minus a configurable ~5% selling friction (`resale:` in `config.yaml`),
-  minus the landed cost. ROI% shown alongside.
-- **💸 Biggest savings** — the same stock ranked by the **raw saving**:
-  landed cost vs the UK average for a new unit. The exact number the
-  WhatsApp alerts fire on (★ rows clear your alert bar).
+```text
+saving % = (expected UK price - all-in cost) / expected UK price
+```
 
-Both views have search, product-family / model / market filters, "hide JIS
-keyboards", "hide auctions", an "alert-worthy only" switch, sortable
-columns, and NEW badges on listings that appeared since you last looked.
-Classifieds finds (Craigslist/Gumtree) carry a red no-buyer-protection chip.
+Each row/card shows the percentage and pound saving first, then the exact
+product, all-in cost, expected price, condition, market and a direct action.
+The top result is highlighted but remains part of the same list. Search,
+product, market and condition are always visible; less common controls live
+under “More filters”. Only the first results are rendered initially, so the
+page stays quick and readable even after a large scan.
 
-Under the hood, every listing is graded into a condition tier — these drive
-the scoring and the alerts:
+The **expected UK price** starts with the configured exact model and base spec,
+then adjusts for:
 
-1. **🏪 RESALE-GRADE — new / unopened / unused.** What the bot always hunted:
-   sealed or never-used machines that can be resold as new-ish, so the deal
-   works as arbitrage. Battery-cycle ceiling: **10**.
-2. **🎯 PRACTICALLY NEW — buy-to-use.** Lightly used machines whose usage
-   makes no practical difference to condition or longevity — noticeably
-   cheaper to buy, but not resale stock. The bar is deliberately strict on
-   both axes:
-   - **Zero visible wear** — only the top used grade of each market qualifies:
-     Mercari 目立った傷や汚れなし ("no visible scratches or dirt"), JP titles
-     saying 美品/極美品/新品同様, Swappa **Mint** (human-verified), and eBay
-     **Used** only when the title itself claims like-new/mint/pristine/low
-     cycles. One grade lower ("Good", やや傷あり) admits visible wear and is
-     excluded.
-   - **≤ 60 battery cycles** (when stated; unknown is allowed but flagged).
-     Apple rates these batteries at 1,000 cycles to 80% capacity, so 60
-     cycles ≈ 6% of rated life — battery health still ~98%+, which is inside
-     the unit-to-unit variance of brand-new machines. It's about 1–2 months
-     of light use: too little to wear a keyboard, trackpad or hinge.
-   Savings are still measured against the **same UK average for a new unit** —
-   a practically-new alert literally reads "this much cheaper than buying new".
-   Tune both knobs under `personal:` in `config.yaml` (set `enabled: false`
-   to go back to new-only scanning).
-3. **💎 BEST VALUE — the top 100 deals for price relative to condition.**
-   Every buyable listing from every market and every condition tier (down to
-   "good": light visible wear — Mercari やや傷や汚れあり, Swappa Good, plain
-   eBay Used), re-scored by an algorithm that asks *"how far below the fair
-   UK price for this model IN this condition is the all-in cost?"*:
-   - **Fair value per condition** comes from real market data: new = the
-     model's UK average; good = the **eBay UK sold median for used units**
-     (refresh with `ukprices --write`); like-new = the midpoint. Researched
-     fallback factors (88% / 78% of new) cover models without enough sold
-     data, and used medians are sanity-clamped to 55–92% of new so spec-mix
-     noise can't invert the ladder.
-   - **Battery wear is priced in, smoothly**: each stated cycle consumes
-     1/1000th of a £249 UK battery service, added to the landed cost before
-     scoring — 40 cycles ≈ £10 (noise), 600 cycles ≈ £149 (a real haircut).
-   - **Baselines**: worse-than-"good" condition never enters the bot; over
-     **800 cycles** is excluded outright (that much use *is* a poor-condition
-     signal); auctions are excluded (a current bid isn't a price you can
-     pay); "brand new" listings stating a well-used battery are treated as
-     mislistings; and anything priced below **45% of its condition-fair
-     value** is dropped as scam/damage territory.
-   This ranking is analysis-only: **no WhatsApp alerts** fire from it. All
-   knobs live under `value:` in `config.yaml`.
+- RAM and SSD capacity (including current 8TB/16TB and high-memory Studio
+  configurations);
+- new, open-box, like-new or used condition;
+- a JIS/EU keyboard and Studio Display variants;
+- battery cycles above the normal baseline for that condition.
+
+Valid recent used medians are used when available. Clearly contaminated data
+(for example, a used median higher than new) is rejected in favour of the
+documented fallback rather than silently clamped. Missing size chooses the
+lowest compatible benchmark, so uncertainty cannot manufacture a bargain.
+
+The dashboard also shows a secondary **overall score**. It is deliberately
+transparent: the saving is multiplied by benchmark confidence and listing /
+buyability confidence. eBay/Swappa evidence therefore scores above an
+unverified collection-only advert at the same saving, while the raw saving
+remains visible. This score never replaces the headline £/% calculation.
 
 ## 4. How the bot decides what's a "deal"
 
@@ -320,50 +295,30 @@ item price ($)
 + £12   (courier handling fee)
 ```
 
-That landed GBP figure is compared with the **UK average price** for the exact
-model (stored in `config.yaml`, see section 5). The difference is the **saving %**.
-
-**Alert thresholds** (changeable in `config.yaml` under `alerts:`) are
-**per region** and **split by whether the product ships with a keyboard**.
-JP prices genuinely run lower, so its bar is higher — but the *size* of that
-premium depends on the product: a Japanese MacBook or iMac carries a JIS
-keyboard (a real UK-resale handicap), while a Mac mini, Mac Studio, Studio
-Display or iPad from Japan is the identical product you'd buy here, so its
-foreign premium only covers forwarding hassle:
-
-| Region | MacBook / iMac 📣 | Keyboardless 📣 | 🔥 hot | ⚠️ *suspicious* |
-|---|---|---|---|---|
-| 🇬🇧 eBay UK / Gumtree | **≥ 35%** | **≥ 35%** | +5 | +15 |
-| 🇺🇸 eBay US / Swappa / Craigslist | **≥ 35%** | **≥ 35%** | +5 | +15 |
-| 🇩🇪 eBay Germany | **≥ 38%** | **≥ 35%** | +5 | +15 |
-| 🇯🇵 Mercari / Yahoo / Rakuma / PayPay | **≥ 50%** | **≥ 42%** | +5 | +15 |
-
-All percentages are savings on the **full landed cost** (fees, shipping
-scaled to the product, and VAT included) vs the UK average. Deals below the
-alert bar still appear on the dashboard — they just don't buzz your phone.
-The ⚠️ level still alerts, but flagged: likely a scam, box-only, or
-mis-listed item — read the listing very carefully.
+That landed GBP figure is compared with the condition/spec-aware **expected UK
+price** described above. `alerts.min_savings_pct` is one threshold everywhere
+(35% by default), because keyboard/layout disadvantages and import costs are
+now included explicitly in the calculation. Deals below it still appear on
+the dashboard. Suspiciously cheap or low-confidence results remain visible as
+leads but cannot buzz your phone; auctions are not ranked because a current bid
+is not a payable price.
 
 Other guardrails baked in:
 
-- Only Mercari condition grades **新品、未使用** (brand new, unused) and
-  **未使用に近い** (almost unused) are fetched; Yahoo is searched with its
-  "unused" filter; eBay US is searched with the **Brand New + Open Box**
-  condition filters (and Buy-It-Now only, so the price shown is payable now —
-  drop `LH_BIN=1` from `ebay_us_extra_params` in config to include auctions);
-  Swappa is kept to its **New + Mint** grades (listings there are
-  human-reviewed before going live, and each card states the exact
-  chip/RAM/storage, so matching is precise).
+- Mercari condition grades 1–4 are searched: unused, nearly unused, no visible
+  wear and light wear. eBay and Swappa likewise include their sound used
+  grades. Each condition is scored against its own expected UK price, so a
+  used unit no longer gets an unfair comparison with new stock.
 - Listings mentioning ジャンク (junk), 箱のみ (box only), 整備済 (refurbished),
   parts-only, broken, etc. are excluded automatically — plus English trap words
   for eBay (refurb, for parts, cracked, activation lock / MDM, box only,
   local-pickup-only listings a UK buyer can't receive, ...).
 - eBay listings that accept a **Best Offer** are flagged — the displayed
   saving is the floor, not the ceiling; haggle.
-- If a seller states a **battery cycle count** (in the title or description, e.g.
-  「充放電回数：4回」), the bot reads it. Anything over **10 cycles** is never
-  alerted (edit `max_battery_cycles` to change). "cyc?" in the results means the
-  seller didn't state it — worth asking via the proxy's "contact seller" feature.
+- If a seller states a **battery cycle count** (in the title or description,
+  e.g. 「充放電回数：4回」), the bot reads it. The defaults are 10 cycles for
+  new/unused claims, 60 for like-new and 800 for used; excess wear also lowers
+  the expected price. Unknown counts are called out for manual checking.
 - **Keyboard layout** is flagged: JP listings are usually JIS layout. "US配列" /
   "USキーボード" in the listing = US layout (closest to UK). The bot can't detect
   genuine UK layout — it's near-nonexistent on the JP market.
@@ -376,9 +331,9 @@ Other guardrails baked in:
 `config.yaml` holds two benchmark prices per model:
 
 - `uk_avg_gbp` — what a UK buyer pays for a **new / open-box-unused** unit
-  (drives the resale + practically-new savings figures);
+  (the starting point for new and like-new estimates);
 - `uk_used_gbp` — the **eBay UK sold median for used units** (drives the
-  condition-aware fair values in the Best value tab).
+  condition-aware expected price for used and like-new stock).
 
 Both are refreshed from real recent eBay UK SOLD listings (medians only
 written when there are **10+ sales** behind them — small samples are noise):
@@ -446,19 +401,17 @@ better — it's your benchmark.
 | Swappa errors about patchright / Chrome | Swappa needs two things the other sources don't: `python3 -m pip install patchright`, and Google Chrome installed. No Chrome / no desktop session (e.g. a headless server) = Swappa gets skipped; everything else still works. |
 | Swappa "challenge did not clear" | Cloudflare escalated for your connection. Delete the `.swappa_chrome_profile` folder and rescan; if it persists, Swappa may have tightened things — run with `--debug` and send `debug_swappa_blocked.html` to Claude. |
 | Gumtree returns 0 / "HTTP 247" | Gumtree rate-limits query bursts aggressively. The bot already paces itself; if you scanned repeatedly in a short window, wait 15–30 min and it recovers on its own. |
-| Craigslist finds look unbuyable | That's the nature of the source: local pickup + cash, no shipping, no buyer protection. Treat them as leads (a US friend, or message the seller about posting) — the red chip on the dashboard reminds you. |
 | Yahoo/Buyee scan is slow on first query | Normal: the invisible browser solves Buyee's bot-check once (a few seconds), then the bot reuses the earned token at full speed. |
 | Lots of weird matches / misses | Check `queries:` in config — you can add/remove search phrases freely. |
 | Exchange rate shows "(fallback)" | The free FX API was unreachable; the bot used `fx.fallback_jpy_per_gbp` from config. Update that number occasionally. |
-| It alerted a scammy-looking listing | That's what the ⚠️ ≥55% flag is for — the bot surfaces, you judge. Add recurring junk words to `filters.exclude_keywords`. |
+| A scammy-looking listing appears | Suspiciously low and low-confidence rows are kept as visible leads but blocked from WhatsApp. Add any recurring trap words to `filters.exclude_keywords`. |
 
-**A honest note on scrapers:** Mercari, Yahoo and eBay change their websites from
+**An honest note on scrapers:** Mercari, Yahoo, Gumtree and eBay change their websites from
 time to time. When that happens a source may suddenly return 0 results — the bot
-won't crash, but it'll go quiet on that source. The JP scrapers were built in a
-sandbox without live access; the **eBay US scraper was built and tested against
-the live site (July 2026)** and handles eBay's several page layouts. If anything
-errors or returns nothing, copy the terminal output (and any `debug_*.html`
-files) back to Claude for a patch.
+keeps the last successful snapshot for a few hours and continues through every
+other source. Gumtree's current category feeds, descriptions, exact price fields
+and pagination were live-tested in July 2026. If a source stays stale, run with
+`--debug` and inspect the matching `debug_*.html` file.
 
 ---
 

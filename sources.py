@@ -1,7 +1,7 @@
 """
 sources.py - fetches listings from Mercari JP, Yahoo! Auctions JP, Rakuma and
 PayPay Flea Market (the marketplaces behind Buyee/ZenMarket), eBay US/UK/DE,
-Swappa, Craigslist and Gumtree, plus an eBay-UK sold-listings price helper.
+Swappa and Gumtree, plus an eBay-UK sold-listings price helper.
 """
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import statistics
 import time
 import unicodedata
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from pricing import Listing, find_cycle_count, is_wanted_ad
+from pricing import Listing, find_cycle_count, is_excluded, is_wanted_ad
 
 
 def scan_queries(cfg) -> list[tuple[str, str]]:
@@ -123,8 +123,20 @@ def _http_get(url: str, referer: str = "", warmup: str = "", lang: str = "ja") -
                 if r.status_code == 200 and r.text:
                     return r.text
                 last_status, last_body = r.status_code, r.text or ""
+                # 247 is Gumtree's non-standard rate-limit response; 429 is
+                # the standard equivalent. Trying three more fingerprints
+                # turns one polite refusal into four rapid requests and makes
+                # the cooldown longer, so surface it immediately to the
+                # source-specific backoff/circuit-breaker instead.
+                if r.status_code in (247, 429):
+                    raise FetchError(
+                        f"HTTP {r.status_code} (rate limited; browser-profile "
+                        f"rotation suppressed)", status=r.status_code,
+                        body=last_body)
                 # blocked with this fingerprint - try the next one
                 time.sleep(1.2)
+            except FetchError:
+                raise
             except Exception as e:
                 last_err = e
                 time.sleep(1.2)
@@ -194,12 +206,13 @@ async def _mercari_search_async(queries, conditions, pages) -> list[Listing]:
             for it in res.items:
                 if it.real_price is None:
                     continue
-                # condition id -> (label, tier): 1-2 are unused (resale-safe),
+                # condition id -> (label, tier): 1 is genuinely unused;
+                # 2 literally means "close to unused" and is valued like-new,
                 # 3 = "no visible scratches or dirt" (practically-new tier),
                 # 4 = "some scratches/dirt" (best-value section only)
                 cond, grade = {
                     1: ("新品、未使用", "resale"),
-                    2: ("未使用に近い", "resale"),
+                    2: ("未使用に近い", "personal"),
                     3: ("目立った傷や汚れなし", "personal"),
                     4: ("やや傷や汚れあり", "good"),
                 }.get(it.item_condition_id,
@@ -346,24 +359,94 @@ def _looks_hard_blocked(html: str) -> bool:
     return len(html) < 2500 and bool(_BLOCK_RE.search(html))
 
 
+_NAVIGATION_RACE_MARKERS = (
+    "page.content: unable to retrieve content because the page is navigating",
+    "navigating and changing the content",
+    "execution context was destroyed",
+    "navigation interrupted",
+    "interrupted by another navigation",
+    "cannot find context with specified id",
+)
+_DEAD_BROWSER_MARKERS = (
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+    "context has been closed",
+    "page has been closed",
+    "connection closed",
+)
+
+
+def _is_navigation_race(error: BaseException) -> bool:
+    """True for transient Playwright errors caused by an in-flight redirect.
+
+    Kept as a pure helper so the exact retry boundary can be regression-tested
+    without starting a browser.
+    """
+    msg = str(error).lower()
+    return (any(marker in msg for marker in _NAVIGATION_RACE_MARKERS)
+            or ("page.goto" in msg and "timeout" in msg))
+
+
+def _is_dead_browser_error(error: BaseException) -> bool:
+    """True when a browser/page object cannot be reused for another request."""
+    msg = str(error).lower()
+    return any(marker in msg for marker in _DEAD_BROWSER_MARKERS)
+
+
+def _stable_page_content(page, deadline: float) -> str:
+    """Read page HTML after redirects settle, tolerating content/navigation races."""
+    last_error: Optional[BaseException] = None
+    while time.time() < deadline:
+        try:
+            return page.content()
+        except BaseException as e:
+            if not _is_navigation_race(e):
+                raise
+            last_error = e
+            remaining_ms = max(50, min(400, int((deadline - time.time()) * 1000)))
+            page.wait_for_timeout(remaining_ms)
+    if last_error is not None:
+        raise last_error
+    raise FetchError("browser page did not become readable before the deadline")
+
+
 def _browser_fetch(url: str, timeout_ms: int = 35000) -> str:
     """Load a Buyee URL in headless Chromium. The AWS WAF challenge runs its
     JavaScript and reloads the page by itself - we just poll until the
-    content stops looking like a challenge."""
-    page = _browser_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-    deadline = time.time() + timeout_ms / 1000
-    html = page.content()
-    while _looks_like_waf(html) and time.time() < deadline:
-        page.wait_for_timeout(1500)   # challenge solves + auto-reloads
-        html = page.content()
-    if _looks_like_waf(html):
-        raise FetchError("Buyee's bot-check did not clear in the browser "
-                         "(it may have escalated to a CAPTCHA)", body=html)
-    if _looks_hard_blocked(html):
-        raise FetchError("Buyee's server refused the browser outright "
-                         "(403 page)", status=403, body=html)
-    return html
+    content stops looking like a challenge. Buyee occasionally redirects at
+    exactly the moment page.content() is called; wait it out and retry the
+    navigation once instead of losing that query."""
+    last_race: Optional[BaseException] = None
+    for attempt in (1, 2):
+        page = _browser_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            deadline = time.time() + timeout_ms / 1000
+            html = _stable_page_content(page, deadline)
+            while _looks_like_waf(html) and time.time() < deadline:
+                page.wait_for_timeout(1500)   # challenge solves + auto-reloads
+                html = _stable_page_content(page, deadline)
+            if _looks_like_waf(html):
+                raise FetchError("Buyee's bot-check did not clear in the browser "
+                                 "(it may have escalated to a CAPTCHA)", body=html)
+            if _looks_hard_blocked(html):
+                raise FetchError("Buyee's server refused the browser outright "
+                                 "(403 page)", status=403, body=html)
+            return html
+        except BaseException as e:
+            if attempt == 2 or not (_is_navigation_race(e)
+                                    or _is_dead_browser_error(e)):
+                raise
+            last_race = e
+            if _is_dead_browser_error(e):
+                _browser_close()
+            else:
+                try:
+                    page.wait_for_timeout(600)
+                except Exception:
+                    _browser_close()
+    raise FetchError(f"Buyee navigation stayed unstable: {last_race}")
 
 
 def _adopt_browser_cookies():
@@ -430,8 +513,8 @@ def _buyee_variants(cfg) -> list[tuple[str, str]]:
     (brand new) for the resale tier, plus 美品 (beautiful condition - catches
     極美品/超美品 too) for the like-new tier.
 
-    To keep the browser-path fetch count sane, high-volume families (MacBook,
-    iMac, iPads) search per query/with all words, while the slow-moving
+    To keep the browser-path fetch count sane, high-volume MacBooks search per
+    query/with all words, while iMac and the slow-moving
     desktop families use ONE broad search per family with two words - their
     entire recent unused stock fits on the first page anyway."""
     personal_on = cfg.get("personal", {}).get("enabled", True)
@@ -439,7 +522,7 @@ def _buyee_variants(cfg) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     seen_broad: set = set()
     for q, fam in scan_queries(cfg):
-        if fam == "macbook" or fam.startswith("ipad"):
+        if fam == "macbook":
             out += [(f"{q} {w}", fam) for w in full]
         elif fam == "imac":
             out += [(f"{q} {w}", fam) for w in ["未使用", "新品"]]
@@ -1167,8 +1250,6 @@ def _fetch_ebay_cycles(item_id: str, source: str) -> Optional[int]:
 # Classifieds have no condition filters and no buyer protection, so the bar
 # is strict: only titles that CLAIM new/sealed (resale tier) or like-new
 # (personal tier) are accepted, and "wanted"/"we buy" ads are dropped.
-# Craigslist is local-pickup/cash culture - finds there are leads to act on
-# via a US contact (or a seller willing to post), not one-click buys.
 
 _EN_NEW_RE = re.compile(
     r"\bsealed\b|brand\s*new|new\s*in\s*box|\bbnib\b|\bunopened\b|"
@@ -1178,8 +1259,7 @@ _EN_NEW_RE = re.compile(
 # and their rate limits are touchy - fewer, broader requests win)
 _BROAD_QUERY = {"macbook": "MacBook Pro", "mac_mini": "Mac mini",
                 "mac_studio": "Mac Studio", "imac": "iMac",
-                "mac_pro": "Mac Pro", "display": "Apple Studio Display",
-                "ipad_pro": "iPad Pro", "ipad_air": "iPad Air"}
+                "mac_pro": "Mac Pro", "display": "Apple Studio Display"}
 
 
 def _broad_queries(cfg) -> list[tuple[str, str]]:
@@ -1201,181 +1281,329 @@ def _en_grade(title: str) -> Optional[str]:
     return None
 
 
-def scan_craigslist(cfg, debug: bool = False) -> list[Listing]:
-    """Craigslist search across the metros in scan.craigslist_cities, using
-    the static (no-JavaScript) results markup. Computers-for-sale-by-owner
-    section; near-new title claims only."""
-    cities = [str(c) for c in cfg["scan"].get("craigslist_cities",
-                                              ["newyork", "losangeles",
-                                               "sfbay", "seattle"])]
-    out: dict[str, Listing] = {}
-    for q, fam in _broad_queries(cfg):
-        min_usd = min_price_for(cfg, fam, "usd")
-        for city in cities:
-            url = (f"https://{city}.craigslist.org/search/sya?query="
-                   + quote(q) + f"&min_price={min_usd}")
-            try:
-                html = _http_get(url, lang="en-US")
-            except Exception as e:
-                print(f"  [craigslist] {city} search '{q}' failed: {e}")
-                if debug and isinstance(e, FetchError) and e.body:
-                    with open("debug_craigslist_blocked.html", "w",
-                              encoding="utf-8") as f:
-                        f.write(e.body)
-                continue
-            if debug:
-                fn = (f"debug_craigslist_{city}_"
-                      f"{re.sub(r'[^A-Za-z0-9]+', '_', q)}.html")
-                with open(fn, "w", encoding="utf-8") as f:
-                    f.write(html)
-            soup = BeautifulSoup(html, "html.parser")
-            results = soup.select("li.cl-static-search-result")
-            found_here = 0
-            for li in results:
-                a = li.select_one("a[href]")
-                t_el = li.select_one(".title")
-                p_el = li.select_one(".price")
-                if not a or not t_el:
-                    continue
-                title = t_el.get_text(" ", strip=True)
-                if len(title) < 8 or is_wanted_ad(title):
-                    continue
-                grade = _en_grade(title)
-                if grade is None:
-                    continue
-                href = a.get("href", "")
-                item_id = href.rstrip("/").rsplit("/", 1)[-1][:40]
-                if not item_id or item_id in out:
-                    continue
-                price = _first_usd_price(p_el.get_text(" ", strip=True)
-                                         if p_el else "")
-                if price is None or price < min_usd:
-                    continue
-                out[item_id] = Listing(
-                    item_id=item_id,
-                    source="craigslist",
-                    title=title,
-                    price=price,
-                    currency="USD",
-                    condition=("seller says new/sealed" if grade == "resale"
-                               else "seller says like new"),
-                    url=href,
-                    grade=grade,
-                )
-                out[item_id].keyboard = "US"
-                found_here += 1
-            if debug:
-                print(f"  [craigslist] {city} '{q}': {len(results)} results, "
-                      f"{found_here} usable")
-            time.sleep(1.0)
-    return list(out.values())
-
-
-def fetch_craigslist_cycles(item_id: str) -> Optional[int]:
-    return None      # listing URLs vary by city; not worth a fetch
-
-
+GUMTREE_HOME = "https://www.gumtree.com/"
 GUMTREE_ID_RE = re.compile(r"/(\d{8,})/?$")
+_GUMTREE_URLS: dict[str, str] = {}
+
+# Two category-scoped feeds cover every configured family and leave requests
+# for later pages. This replaces repeated broad all-category searches.
+GUMTREE_DEFAULT_FEEDS = (
+    {
+        "name": "apple_macs",
+        "url": ("https://www.gumtree.com/for-sale/computers-software/"
+                "computers-pcs-laptops/macs"),
+        "families": ("macbook", "mac_mini", "mac_studio", "imac", "mac_pro"),
+    },
+    {
+        "name": "studio_display",
+        "url": ("https://www.gumtree.com/for-sale/computers-software/"
+                "computers-pcs-laptops/monitors-projectors/computer-monitors/"
+                "srpsearch%2Bapple%2Bstudio%2Bdisplay"),
+        "families": ("display",),
+    },
+)
+
+_GUMTREE_SELECTORS = {
+    "title": "[data-q='tile-title'], [data-q='search-result-title']",
+    "description": ("[data-q='tile-description'], "
+                    "[data-q='search-result-description']"),
+    "location": "[data-q='tile-location'], [data-q='search-result-location']",
+    "price": "[data-q='tile-price'], [data-q='search-result-price']",
+    "condition": "[data-q='tile-condition'], [data-q='search-result-condition']",
+}
+_GUMTREE_PRICE_RE = re.compile(r"£\s*([\d,]+(?:\.\d{1,2})?)")
+_GUMTREE_HARD_RISK_RE = re.compile(
+    r"\b(?:mdm|mobile\s+device\s+management)\b|"
+    r"\b(?:icloud|activation)\s*(?:lock|locked)\b|"
+    r"\b(?:bypass|bypassed|blacklisted|stolen)\b|"
+    r"\b(?:for\s+parts|parts\s+only|spares?\s*(?:or|/|&)\s*repairs?|"
+    r"not\s+working|doesn['’]?t\s+work|faulty|screen\s+fault|"
+    r"cracked\s+screen|broken\s+screen)\b", re.I)
+_GUMTREE_DESC_WANTED_RE = re.compile(
+    r"\bwe\s+buy\b|\bcash\s+for\b|\bsell\s+your\b|\btrade[- ]?in\b|"
+    r"\bbuying\s+(?:all|any|your)\b", re.I)
+_GUMTREE_COND_NEW_RE = re.compile(
+    r"^\s*(?:brand\s+new|new|unused|new\s+condition|new\s+with\s+tags)\s*$", re.I)
+_GUMTREE_COND_LIKE_NEW_RE = re.compile(
+    r"as\s+good\s+as\s+new|like\s+new|mint|pristine|immaculate|excellent", re.I)
+
+
+def _gumtree_newest_url(url: str) -> str:
+    """Return a Gumtree URL with its newest-first sort made explicit."""
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k.lower() not in ("sort", "search_sort")]
+    query.append(("sort", "date"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
+
+
+def _gumtree_item_id(href: str) -> Optional[str]:
+    """Extract an ad ID while ignoring query strings and fragments."""
+    try:
+        path = urlsplit(href).path
+    except Exception:
+        path = href.split("?", 1)[0].split("#", 1)[0]
+    m = GUMTREE_ID_RE.search(path)
+    return m.group(1) if m else None
+
+
+def _gumtree_family_hint(text: str) -> Optional[str]:
+    """Cheap family routing before the full shared model parser runs."""
+    t = unicodedata.normalize("NFKC", text).lower()
+    for family, pattern in (
+        ("display", r"\b(?:apple\s+)?studio\s+display\b"),
+        ("mac_studio", r"\bmac\s*studio\b"),
+        ("mac_mini", r"\bmac\s*mini\b"),
+        ("imac", r"\bimac\b"),
+        ("mac_pro", r"\bmac\s+pro\b"),
+        ("macbook", r"\bmac\s*book\s*pro\b"),
+    ):
+        if re.search(pattern, t, re.I):
+            return family
+    return None
+
+
+def _gumtree_grade(title: str, description: str = "", condition: str = "",
+                   allow_good: bool = False) -> Optional[str]:
+    """Classify a Gumtree tile from structured condition plus seller text."""
+    cond = condition.strip()
+    if cond and _GUMTREE_COND_NEW_RE.search(cond):
+        return "resale"
+    if cond and _GUMTREE_COND_LIKE_NEW_RE.search(cond):
+        return "personal"
+    if cond and allow_good and re.search(r"\b(?:good|used|fair)\b", cond, re.I):
+        return "good"
+    grade = _en_grade(" ".join(x for x in (title, description) if x))
+    if grade is not None:
+        return grade
+    return "good" if allow_good else None
+
+
+def _gumtree_is_unsafe(title: str, description: str,
+                       exclude_keywords=()) -> bool:
+    """Reject wanted, locked, bypassed, broken, parts and configured traps."""
+    blob = " ".join(x for x in (title, description) if x)
+    return bool(is_wanted_ad(title)
+                or _GUMTREE_DESC_WANTED_RE.search(description)
+                or _GUMTREE_HARD_RISK_RE.search(blob)
+                or is_excluded(blob, list(exclude_keywords)))
+
+
+def _gumtree_element_text(tile, field: str, fallback: str = "") -> str:
+    el = tile.select_one(_GUMTREE_SELECTORS[field])
+    return el.get_text(" ", strip=True) if el else fallback
+
+
+def _gumtree_feed_specs(cfg) -> list[dict]:
+    """Normalise optional scan.gumtree_feeds into testable feed dictionaries.
+
+    Entries may be URL strings or mappings with url/name/family/families/pages.
+    """
+    tracked = {fam for _, fam in scan_queries(cfg)}
+    raw = cfg["scan"].get("gumtree_feeds")
+    if raw is None:
+        raw = list(GUMTREE_DEFAULT_FEEDS)
+    elif isinstance(raw, dict) and "url" not in raw:
+        normalised = []
+        for name, value in raw.items():
+            if isinstance(value, dict):
+                spec = dict(value)
+                spec.setdefault("name", name)
+            else:
+                spec = {"name": name, "url": value}
+            normalised.append(spec)
+        raw = normalised
+    elif isinstance(raw, (str, dict)):
+        raw = [raw]
+
+    default_pages = max(1, int(cfg["scan"].get("gumtree_pages_per_feed", 2)))
+    feeds: list[dict] = []
+    for i, entry in enumerate(raw or []):
+        spec = {"url": entry} if isinstance(entry, str) else dict(entry)
+        url = str(spec.get("url", "")).strip()
+        if not url:
+            continue
+        families = spec.get("families", spec.get("family", ()))
+        if isinstance(families, str):
+            families = [families]
+        families = {str(f) for f in (families or []) if str(f) in tracked}
+        if not families:
+            low = (str(spec.get("name", "")) + " " + url).lower()
+            if "monitor" in low or "display" in low:
+                families = tracked & {"display"}
+            else:
+                families = tracked & {"macbook", "mac_mini", "mac_studio",
+                                      "imac", "mac_pro"}
+        feeds.append({
+            "name": str(spec.get("name") or f"feed_{i + 1}"),
+            "url": _gumtree_newest_url(urljoin(GUMTREE_HOME, url)),
+            "families": families,
+            "pages": max(1, int(spec.get("pages", default_pages))),
+        })
+    return feeds
+
+
+def _parse_gumtree_page(html: str, cfg, current_url: str = GUMTREE_HOME,
+                        allowed_families=None) -> tuple[list[Listing], Optional[str], int]:
+    """Pure Gumtree HTML parser: (usable listings, next-page URL, tile count)."""
+    soup = BeautifulSoup(html, "html.parser")
+    anchors = soup.select('a[data-q="search-result-anchor"]')
+    out: dict[str, Listing] = {}
+    allow_good = bool(cfg.get("value", {}).get("enabled", False))
+    personal_on = bool(cfg.get("personal", {}).get("enabled", True))
+    excluded = cfg.get("filters", {}).get("exclude_keywords", [])
+    allowed = set(allowed_families or ())
+
+    for tile in anchors:
+        href = (tile.get("href") or "").strip()
+        item_id = _gumtree_item_id(href)
+        if not item_id or item_id in out:
+            continue
+        title = _gumtree_element_text(tile, "title")
+        if not title:
+            heading = tile.select_one("h2, h3")
+            title = heading.get_text(" ", strip=True) if heading else ""
+        if len(title) < 8:
+            continue
+        description = _gumtree_element_text(tile, "description")
+        location = _gumtree_element_text(tile, "location")
+        condition_text = _gumtree_element_text(tile, "condition")
+        blob = " ".join(x for x in (title, description, condition_text) if x)
+        family = _gumtree_family_hint(blob)
+        if family is None or (allowed and family not in allowed):
+            continue
+        if _gumtree_is_unsafe(title, description, excluded):
+            continue
+        grade = _gumtree_grade(title, description, condition_text, allow_good)
+        if grade == "personal" and not personal_on:
+            grade = "good" if allow_good else None
+        if grade is None:
+            continue
+
+        price_text = _gumtree_element_text(tile, "price")
+        pm = _GUMTREE_PRICE_RE.search(price_text)
+        if not pm:
+            # Layout fallback only: take the LAST pound amount, because RRP
+            # claims commonly occur earlier in the title/description.
+            matches = list(_GUMTREE_PRICE_RE.finditer(
+                tile.get_text(" ", strip=True)))
+            pm = matches[-1] if matches else None
+        if not pm:
+            continue
+        price = float(pm.group(1).replace(",", ""))
+        if price < min_price_for(cfg, family, "gbp"):
+            continue
+
+        url = urljoin(GUMTREE_HOME, href)
+        condition_label = condition_text or {
+            "resale": "seller says new/sealed",
+            "personal": "seller says like new",
+            "good": "seller says used/good",
+        }[grade]
+        listing = Listing(
+            item_id=item_id, source="gumtree", title=title, price=price,
+            currency="GBP", condition=condition_label, url=url, grade=grade,
+        )
+        listing.keyboard = "UK"
+        listing.cycles = find_cycle_count(blob)
+        # Listing is intentionally extensible (not slots=True). Preserve tile
+        # metadata for callers/tests now; report layers can consume it later.
+        listing.location = location
+        listing.description = description
+        out[item_id] = listing
+
+    next_el = (soup.select_one("link[rel~='next'][href]")
+               or soup.select_one("a[rel~='next'][href]"))
+    next_url = (urljoin(current_url, next_el.get("href", ""))
+                if next_el else None)
+    if next_url:
+        next_url = _gumtree_newest_url(next_url)
+    return list(out.values()), next_url, len(anchors)
 
 
 def scan_gumtree(cfg, debug: bool = False) -> list[Listing]:
-    """Gumtree UK search - domestic classifieds. Underpriced local listings
-    can be the best flips of all (no import costs), but there's no buyer
-    protection: meet the seller, test the machine, pay on collection."""
+    """Scan category-scoped Gumtree feeds within one polite request budget."""
+    s = cfg["scan"]
+    feeds = _gumtree_feed_specs(cfg)
+    budget = max(1, int(s.get("gumtree_request_budget",
+                              s.get("gumtree_max_requests", 4))))
+    request_delay = max(0.0, float(s.get("gumtree_request_delay_seconds", 2.0)))
+    backoff = max(0.0, float(s.get("gumtree_rate_limit_backoff_seconds", 12.0)))
     out: dict[str, Listing] = {}
-    # Gumtree rate-limits after ~5 quick searches, so stay UNDER the limit:
-    # 4 broad family searches per scan, with the window rotating forward by
-    # 4 each ~20 minutes - every family is covered across two consecutive
-    # scans and the limiter never trips. (Belt and braces: still stop early
-    # if a rate-limit response does appear.)
-    qs = _broad_queries(cfg)
-    if qs:
-        take = min(4, len(qs))
-        start = (int(time.time() // 1200) * take) % len(qs)
-        qs = (qs + qs)[start:start + take]
-    for q, fam in qs:
-        min_gbp = min_price_for(cfg, fam, "gbp")
-        url = ("https://www.gumtree.com/search?search_category=all&q="
-               + quote(q) + f"&min_price={min_gbp}")
+    # Breadth-first queue: every feed gets page one before any feed gets page
+    # two, so later requests expand depth without hiding Studio Displays.
+    queue = [(feed, feed["url"], 1, 0) for feed in feeds]
+    seen_urls: set[str] = set()
+    requests_used = total_tiles = 0
+
+    while queue and requests_used < budget:
+        feed, url, page_no, retry_no = queue.pop(0)
+        if retry_no == 0:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+        requests_used += 1
+        label = str(feed["name"])
         try:
-            html = _http_get(url, referer="https://www.gumtree.com/",
-                             warmup="https://www.gumtree.com/", lang="en-GB")
+            html = _http_get(url, referer=GUMTREE_HOME,
+                             warmup=GUMTREE_HOME, lang="en-GB")
         except Exception as e:
-            print(f"  [gumtree] search '{q}' failed: {e}")
+            print(f"  [gumtree] {label} page {page_no} failed: {e}")
             if debug and isinstance(e, FetchError) and e.body:
-                with open("debug_gumtree_blocked.html", "w",
-                          encoding="utf-8") as f:
+                fn = f"debug_gumtree_{re.sub(r'[^A-Za-z0-9]+', '_', label)}_blocked.html"
+                with open(fn, "w", encoding="utf-8") as f:
                     f.write(e.body)
-                print("  [gumtree] saved the block page to "
-                      "debug_gumtree_blocked.html")
-            if isinstance(e, FetchError) and e.status == 247:
-                print("  [gumtree] rate-limited - stopping here this scan "
-                      "(the rotation resumes from the next family next scan)")
+                print(f"  [gumtree] saved the block page to {fn}")
+            if isinstance(e, FetchError) and e.status in (247, 429):
+                delay = backoff * (2 ** retry_no)
+                print(f"  [gumtree] rate-limited; backing off {delay:.0f}s")
+                if delay:
+                    time.sleep(delay)
+                if retry_no == 0 and requests_used < budget:
+                    queue.insert(0, (feed, url, page_no, 1))
+                    continue
                 break
             continue
+
         if debug:
-            fn = f"debug_gumtree_{re.sub(r'[^A-Za-z0-9]+', '_', q)}.html"
+            safe = re.sub(r"[^A-Za-z0-9]+", "_", label)
+            fn = f"debug_gumtree_{safe}_p{page_no}.html"
             with open(fn, "w", encoding="utf-8") as f:
                 f.write(html)
-        soup = BeautifulSoup(html, "html.parser")
-        anchors = soup.select('a[data-q="search-result-anchor"]')
-        found_here = 0
-        for a in anchors:
-            href = a.get("href", "")
-            m = GUMTREE_ID_RE.search(href)
-            if not m:
-                continue
-            item_id = m.group(1)
-            if item_id in out:
-                continue
-            text = a.get_text(" ", strip=True)
-            # title: a heading element when present, else the text before the
-            # price (tile text runs "[Featured] [photo-count] TITLE £PRICE …")
-            t_el = a.select_one("h2, h3, [data-q='tile-title']")
-            title = t_el.get_text(" ", strip=True) if t_el else \
-                re.sub(r"^\s*(?:FEATURED\s*)?\d{0,2}\s*", "",
-                       text.split("£")[0], flags=re.I).strip()
-            if len(title) < 8 or is_wanted_ad(title):
-                continue
-            grade = _en_grade(title)
-            if grade is None:
-                continue
-            pm = re.search(r"£\s*([\d,]+)", text)
-            if not pm:
-                continue
-            price = float(pm.group(1).replace(",", ""))
-            if price < min_gbp:
-                continue
-            out[item_id] = Listing(
-                item_id=item_id,
-                source="gumtree",
-                title=title,
-                price=price,
-                currency="GBP",
-                condition=("seller says new/sealed" if grade == "resale"
-                           else "seller says like new"),
-                url=("https://www.gumtree.com" + href
-                     if href.startswith("/") else href),
-                grade=grade,
-            )
-            out[item_id].keyboard = "UK"
-            found_here += 1
-        if not anchors:
-            print(f"  [gumtree] 0 result tiles for '{q}' - Gumtree may have "
-                  f"changed its markup or blocked the request. Run with "
-                  f"--debug and send debug_gumtree_*.html to Claude.")
-        elif debug:
-            print(f"  [gumtree] '{q}': {len(anchors)} tiles, "
-                  f"{found_here} usable")
-        time.sleep(5.0)      # gumtree rate-limits fast query bursts
+        try:
+            listings, next_url, tile_count = _parse_gumtree_page(
+                html, cfg, current_url=url,
+                allowed_families=feed["families"])
+        except Exception as e:
+            print(f"  [gumtree] could not parse {label} page {page_no}: {e}")
+            continue
+        total_tiles += tile_count
+        for listing in listings:
+            out[listing.item_id] = listing
+            _GUMTREE_URLS[listing.item_id] = listing.url
+        if debug:
+            print(f"  [gumtree] {label} page {page_no}: {tile_count} tiles, "
+                  f"{len(listings)} usable")
+        if next_url and page_no < int(feed["pages"]):
+            queue.append((feed, next_url, page_no + 1, 0))
+        if queue and requests_used < budget and request_delay:
+            time.sleep(request_delay)
+
+    if total_tiles == 0 and feeds:
+        print("  [gumtree] 0 result tiles across every fetched feed - Gumtree "
+              "may have changed its markup or blocked the request. Run with "
+              "--debug and inspect debug_gumtree_*.html.")
     return list(out.values())
 
 
 def fetch_gumtree_cycles(item_id: str) -> Optional[int]:
-    """Battery-cycle lookup from the full Gumtree ad page."""
+    """Battery cycles from the exact captured Gumtree URL when available."""
+    url = _GUMTREE_URLS.get(
+        str(item_id), f"https://www.gumtree.com/p/x/x/{item_id}")
     try:
-        html = _http_get(f"https://www.gumtree.com/p/x/x/{item_id}",
-                         referer="https://www.gumtree.com/", lang="en-GB")
+        html = _http_get(url, referer=GUMTREE_HOME, warmup=GUMTREE_HOME,
+                         lang="en-GB")
         text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
         return find_cycle_count(text)
     except Exception:
@@ -1464,14 +1692,23 @@ def _swappa_worker(q):
             job[1].set()
             continue
         _, url, timeout_s, box, done = job
-        try:
-            if page is None:
+
+        def fetch_once():
+            nonlocal page
+            page_closed = page is None
+            if page is not None:
+                try:
+                    page_closed = page.is_closed()
+                except Exception:
+                    page_closed = True
+            if page_closed:
+                close_browser()
                 launch()
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
             deadline = time.time() + timeout_s
             restore_at = time.time() + timeout_s / 2
             restored = False
-            html = page.content()
+            html = _stable_page_content(page, deadline)
             while time.time() < deadline and SWAPPA_CHALLENGE in html:
                 if not restored and time.time() >= restore_at:
                     # a fresh challenge that won't clear minimized gets a
@@ -1479,16 +1716,35 @@ def _swappa_worker(q):
                     set_window("normal")
                     restored = True
                 page.wait_for_timeout(1500)
-                html = page.content()
+                html = _stable_page_content(page, deadline)
             if restored:
                 set_window("minimized")
             if SWAPPA_CHALLENGE in html:
                 raise FetchError("Swappa's Cloudflare challenge did not clear "
                                  "(it may have escalated for this connection)",
                                  body=html)
-            box["v"] = html
-        except BaseException as e:
-            box["e"] = e
+            return html
+
+        try:
+            last_error: Optional[BaseException] = None
+            for attempt in (1, 2):
+                try:
+                    box["v"] = fetch_once()
+                    break
+                except BaseException as e:
+                    last_error = e
+                    recoverable = (_is_dead_browser_error(e)
+                                   or _is_navigation_race(e))
+                    if recoverable:
+                        # Do not leave a dead Page in the worker: that was the
+                        # cause of every later watch cycle returning zero.
+                        close_browser()
+                    if attempt == 1 and recoverable:
+                        continue
+                    box["e"] = e
+                    break
+            else:
+                box["e"] = last_error or FetchError("Swappa browser failed")
         finally:
             done.set()
 
@@ -1656,7 +1912,9 @@ def fetch_swappa_cycles(item_id: str) -> Optional[int]:
 # ============================================================================
 
 def ebay_uk_sold_median(query: str, debug: bool = False,
-                        conditions: str = "1000%7C1500") -> tuple[Optional[float], int]:
+                        conditions: str = "1000%7C1500",
+                        plausible_min: float = 50,
+                        plausible_max: float = 12000) -> tuple[Optional[float], int]:
     """Returns (median GBP, sample size) from recent eBay UK sold listings,
     UK located. `conditions` is eBay's LH_ItemCondition filter: the default
     "1000|1500" = New + Open box; pass "3000" for Used (this is what feeds
@@ -1694,8 +1952,10 @@ def ebay_uk_sold_median(query: str, debug: bool = False,
         m = re.search(r"£\s*([\d,]+(?:\.\d{2})?)", t)
         if m:
             prices.append(float(m.group(1).replace(",", "")))
-    # keep plausible laptop prices, trim outliers with the IQR rule
-    prices = [p for p in prices if 300 <= p <= 8000]
+    # Model-relative bounds supplied by the caller keep £150-£250 Mac mini
+    # sales instead of applying the old laptop-only £300 floor, while
+    # still dropping accessory prices and absurd spec-mixed results.
+    prices = [p for p in prices if plausible_min <= p <= plausible_max]
     if len(prices) < 5:
         return None, len(prices)
     prices.sort()

@@ -1,30 +1,21 @@
 # ============================================================
 #  Apple Deal Bot - configuration
-#  This is the ONLY file you should need to edit.
+#  Main settings live here. Local secrets live in config.local.yaml.
 #  Lines starting with # are comments and are ignored.
 # ============================================================
 
 # WhatsApp alerts via CallMeBot (free, one-time setup - see README step C):
 # add +34 644 53 78 49 to your phone contacts, WhatsApp it the message
-# "I allow callmebot to send me messages", and paste the apikey it replies
-# with below. `phone` is YOUR WhatsApp number with country code.
+# "I allow callmebot to send me messages", then put the returned key and your
+# phone number in the ignored config.local.yaml (see README step C).
 whatsapp:
-  enabled: true          # set to true once you've added your phone + apikey below
-  phone: "+447757687048"      # e.g. "+447712345678"
-  apikey: "8378881"    # e.g. "123456"
+  enabled: false         # local credentials belong in ignored config.local.yaml
+  phone: ""              # never commit a real phone number
+  apikey: ""             # never commit a real API key
 
 # ------------------------------------------------------------------
-# The bot outputs TWO tiers:
-#   RESALE-GRADE      new / unopened / unused - what the bot always found.
-#                     Safe to resell as new-ish, so good for arbitrage.
-#   PRACTICALLY NEW   lightly-used units whose usage makes no real difference
-#                     to condition or longevity - for buying to USE, not to
-#                     resell. Bar: zero visible wear (top used grade on each
-#                     market: Mercari 目立った傷や汚れなし, JP 美品/新品同様
-#                     titles, Swappa Mint, eBay Used with like-new/mint/low-
-#                     cycle titles) AND at most `max_battery_cycles` below
-#                     (<=60 = ~6% of Apple's 1000-cycle rating; battery health
-#                     still ~98%+, inside new-unit variance).
+# Listings share one ranking but retain clear condition labels. This section
+# controls the like-new tier's battery-cycle ceiling.
 # ------------------------------------------------------------------
 personal:
   enabled: true
@@ -33,27 +24,24 @@ personal:
   max_battery_cycles: 60
 
 # ------------------------------------------------------------------
-# BEST VALUE (the third output section): every buyable listing from every
-# market and every condition tier, re-scored for how good the deal is FOR
-# THE PRICE RELATIVE TO CONDITION - landed cost (plus pro-rated battery
-# wear) compared against the fair UK value of that model IN that condition,
-# not against the price of a new one. Top `top_n` shown; no WhatsApp alerts.
+# UNIFIED DEAL RANKING: every buyable listing is compared with the expected
+# UK price for the same model, specification and condition. New, like-new and
+# sound used stock therefore share one honest ranking instead of competing
+# "profit", "saving" and "best value" sections.
 # ------------------------------------------------------------------
 value:
-  # OFF since the resale refocus (July 2026): the bot hunts near-new stock
-  # to flip, not worn machines to use. Turning this back on re-admits
-  # "good"-condition listings and the condition-aware value ranking.
-  enabled: false
-  top_n: 100
+  # One condition-aware ranking: new, like-new and sound used listings are
+  # all compared with the price a UK buyer would expect for THAT condition.
+  enabled: true
+  top_n: 250
   # Fair-value fallbacks when a model has no eBay-UK USED sold median yet
   # (run `python macdeals.py ukprices --write` to fill those in with real
   # data): like-new units trade ~88% of new, good-condition ~78%.
   like_new_factor: 0.88
   good_factor: 0.78
-  # Battery economics: Apple rates these batteries 1000 cycles; a UK
-  # battery service is ~£249. Each stated cycle therefore burns ~£0.25 of
-  # value, which is added to the landed cost before scoring (600 cycles =
-  # +£149). Below 60 cycles this is pocket change, exactly as it should be.
+  # Battery economics: sold prices already include normal wear for each
+  # condition, so only cycles ABOVE that tier's baseline lower the expected
+  # price. Apple rates these batteries at 1000 cycles; service is ~£249.
   battery_replacement_gbp: 249
   battery_cycle_rating: 1000
   # Hard floor: listings above this cycle count are heavily used machines
@@ -68,39 +56,38 @@ value:
   # base-model money (and vice versa). GBP per step, tune freely.
   spec_adjustments:
     ram_per_8gb_gbp: 60        # each 8GB of RAM above the base spec
-    ssd_gbp: {128: -150, 256: -80, 512: 0, 1024: 130, 2048: 350, 4096: 700}
+    ssd_gbp: {128: -150, 256: -80, 512: 0, 1024: 130, 2048: 350,
+              4096: 700, 8192: 1200, 16384: 2000}
+
+# How the one expected UK price is derived after the model/base-spec match.
+# The dashboard always compares the all-in landed cost with this number.
+expected_price:
+  configured_benchmark_confidence: 0.72
+  open_box_factor: 0.94
+  ambiguous_new_factor: 0.97
+  like_new_new_weight: 0.50
+  keyboard_penalty_gbp: {JIS: 120, EU: 80, unknown_jp: 100}
+  imac_keyboard_penalty_gbp: 80
+  studio_display_nano_premium_gbp: 150
+  studio_display_height_premium_gbp: 150
 
 alerts:
-  # A WhatsApp alert fires when the ESTIMATED LANDED COST (item + fees +
-  # shipping + UK VAT + courier fee, converted to GBP) is at least `min` %
-  # below the UK average for that model.
-  #   min      - alert fires at this saving
-  #   hot      - extra "INCREDIBLE DEAL" flag at this level
-  #   too_good - beyond this the listing is suspicious (scam / box-only /
-  #              mislabelled). Still shown + alerted, but with a big warning.
-  # Thresholds are PER REGION and split by whether the product has a
-  # keyboard in the box:
-  #  - `regions` applies to MacBooks and iMacs (bundled keyboard): a JIS or
-  #    QWERTZ keyboard is a real UK-resale handicap, so JP/EU bars are higher.
-  #  - `regions_no_keyboard` applies to Mac mini / Mac Studio / Mac Pro /
-  #    Studio Display / iPads: the product is identical wherever it's from,
-  #    so a foreign deal only carries a small forwarding-hassle premium
-  #    (JP sits 7 points above the UK bar instead of 15).
-  regions:
-    uk: {min: 35, hot: 40, too_good: 50}
-    us: {min: 35, hot: 40, too_good: 50}
-    eu: {min: 38, hot: 43, too_good: 53}
-    jp: {min: 50, hot: 55, too_good: 65}
-  regions_no_keyboard:
-    uk: {min: 35, hot: 40, too_good: 50}
-    us: {min: 35, hot: 40, too_good: 50}
-    eu: {min: 35, hot: 40, too_good: 50}
-    jp: {min: 42, hot: 47, too_good: 57}
-  # A whole MacBook never costs less than this fraction of its UK average -
-  # below it the listing is almost certainly a part (screen/board) or
-  # accessory, so it is DROPPED entirely. 0.35 = 35%. Lower this only if
-  # you ever see a real whole unit wrongly excluded.
-  implausible_price_ratio: 0.35
+  # One threshold everywhere. Foreign keyboard/layout disadvantages are now
+  # deducted from expected price directly instead of hidden in regional bars.
+  min_savings_pct: 35
+  hot_savings_pct: 40
+  too_good_pct: 55
+  min_listing_confidence: 0.55
+  min_benchmark_confidence: 0.50
+  # `hot` changes the message headline. `too_good` marks a result for manual
+  # verification and blocks alerts; it remains visible as a lead.
+  # Below this ratio the item is suspiciously cheap relative to the expected
+  # price. It stays visible at reduced confidence but cannot alert.
+  implausible_price_ratio: 0.45
+  # Below this lower hard floor the result is almost certainly an accessory,
+  # component or scam and is excluded. Between the two floors it stays visible
+  # as a low-confidence lead but can never alert.
+  hard_exclude_price_ratio: 0.35
   # Max battery charge cycles you accept for "opened but unused" machines.
   # (Only enforced when the bot can actually find a cycle count in the listing text.)
   max_battery_cycles: 10
@@ -108,11 +95,8 @@ alerts:
   realert_drop_pct: 5
 
 # ------------------------------------------------------------------
-# Reselling economics (the "Resell for profit" view in the dashboard).
-# Estimated flip profit = UK average x (1 - sell_friction_pct/100) - landed
-# cost. Friction covers selling costs and realism: eBay UK private sellers
-# pay no final-value fee (2025), but postage, packaging and the fact that a
-# quick sale usually means pricing slightly under the average all eat a bit.
+# Optional resale-profit estimate retained in CSV/backward-compatible fields.
+# The main dashboard ranking is always expected-price saving, not profit.
 # ------------------------------------------------------------------
 resale:
   sell_friction_pct: 5
@@ -130,11 +114,9 @@ costs:
     rakuma: 0
   # International courier (DHL/FedEx/UPS) for a boxed 14"/16" laptop, ~2-4 kg.
   intl_shipping_jpy: 8000
-  # ...and per product family (an iPad posts cheap; a 27" glass display or an
+  # ...and per product family (a Mac mini posts cheaply; a 27" glass display or an
   # iMac needs serious packing). Families not listed use intl_shipping_jpy.
   intl_shipping_jpy_family:
-    ipad_pro: 4500
-    ipad_air: 4500
     mac_mini: 6000
     mac_studio: 12000
     imac: 20000
@@ -159,8 +141,6 @@ costs:
   us_intl_shipping_usd: 85
   # ...and per product family (same idea as the JP table above).
   us_intl_shipping_usd_family:
-    ipad_pro: 45
-    ipad_air: 45
     mac_mini: 60
     mac_studio: 110
     imac: 180
@@ -173,8 +153,6 @@ costs:
   # VAT applies just like the JP/US routes (0% duty on computers/tablets).
   eu_shipping_eur: 30
   eu_shipping_eur_family:
-    ipad_pro: 20
-    ipad_air: 20
     mac_mini: 25
     mac_studio: 45
     imac: 70
@@ -211,16 +189,13 @@ scan:
   #   ebay_us    = eBay US (the biggest US resale market)
   #   swappa     = Swappa (US, human-verified. Needs Google Chrome +
   #                `pip install patchright`; home connections only)
-  #   craigslist = Craigslist US classifieds (see craigslist_cities below.
-  #                LOCAL PICKUP + CASH culture: you need someone in-city or a
-  #                seller willing to post - treat finds as leads, not clicks)
   #   ebay_uk    = eBay UK (domestic - no import costs, UK returns)
   #   gumtree    = Gumtree UK classifieds (domestic; often collection-only,
   #                no buyer protection - meet locally, pay on collection)
   #   ebay_de    = eBay Germany (biggest EU market; EUR prices, UK VAT on
   #                import applies; QWERTZ keyboards on MacBooks/iMacs)
   # Remove any you don't want; add back any time.
-  sources: [mercari, yahoo, rakuma, paypay, ebay_us, swappa, craigslist,
+  sources: [mercari, yahoo, rakuma, paypay, ebay_us, swappa,
             ebay_uk, gumtree, ebay_de]
   # Search queries (sent to every market - JP sellers list product names in
   # romaji, so the same phrases work everywhere). `family` picks the right
@@ -237,18 +212,21 @@ scan:
     - {q: "iMac M4", family: imac}
     - {q: "Mac Pro M2 Ultra", family: mac_pro}
     - {q: "Apple Studio Display", family: display}
-    - {q: "iPad Pro", family: ipad_pro}
-    - {q: "iPad Air 13", family: ipad_air}
-    - {q: "iPad Air M4", family: ipad_air}
-  # Mercari condition IDs to accept: 1 = brand new/unused, 2 = nearly unused
-  # (both RESALE tier), 3 = "no visible scratches or dirt" (LIKE-NEW tier).
-  # 4 ("some scratches/dirt") only gets fetched if value.enabled is true.
-  mercari_conditions: [1, 2, 3]
-  # Craigslist metros to search (the site has no nationwide search; each
-  # city is a separate request, so keep this list short and relevant).
-  craigslist_cities: [newyork, losangeles, sfbay, seattle]
+  # Mercari condition IDs to accept: 1 = brand new/unused; 2 = nearly unused
+  # and 3 = "no visible scratches or dirt" (both LIKE-NEW); 4 = some light
+  # wear (USED). Every tier is compared with its own expected price.
+  mercari_conditions: [1, 2, 3, 4]
   # Pages of Mercari results per query (about 120 items per page, newest first).
   mercari_pages: 2
+  # Gumtree is covered with two category-scoped, newest-first feeds. The
+  # remaining request budget follows later pages without a burst of searches.
+  gumtree_request_budget: 4
+  gumtree_pages_per_feed: 2
+  gumtree_request_delay_seconds: 3
+  gumtree_rate_limit_backoff_seconds: 15
+  gumtree_feeds:
+    - {name: "Apple Macs", url: "https://www.gumtree.com/for-sale/computers-software/computers-pcs-laptops/macs?sort=date"}
+    - {name: "Studio Display", url: "https://www.gumtree.com/search?search_category=computer-monitors&search_location=uk&q=Apple+Studio+Display&sort=date"}
   # Extra URL parameters for Yahoo Auctions search.
   # istatus=2 = "unused" condition filter, n=50 results, s1=new&o1=d = newest first.
   # If Yahoo ever changes things: do the search in your browser with the filters
@@ -270,9 +248,9 @@ scan:
   # Second eBay pass for the practically-new tier: condition Used (3000),
   # kept only when the title itself claims like-new/mint/pristine/low cycles.
   ebay_us_personal_extra_params: "LH_ItemCondition=3000&LH_BIN=1&LH_PrefLoc=1&_sop=10&_ipg=60"
-  # Swappa condition grades to accept. "New" = sealed (resale tier), "Mint" =
-  # like-new, zero visible wear (practically-new tier), "Good" = light wear
-  # (best-value section only). Swappa human-reviews every listing.
+  # Swappa condition grades to accept. "New" = sealed, "Mint" = like-new,
+  # "Good" = light wear. Each is valued against its own expected price;
+  # Swappa human-reviews every listing.
   swappa_conditions: ["New", "Mint", "Good"]
   # eBay UK search params (same format as the US ones above).
   ebay_uk_extra_params: "LH_ItemCondition=1000%7C1500&LH_BIN=1&LH_PrefLoc=1&_sop=10&_ipg=60"
@@ -281,17 +259,19 @@ scan:
   # stands, chargers, junk). Per family because a near-new Mac mini M2 costs
   # a fraction of a Mac Studio. Queries use the floor of their `family`.
   min_price:
-    macbook:    {jpy: 60000,  usd: 400,  gbp: 350,  eur: 400}
-    mac_mini:   {jpy: 35000,  usd: 250,  gbp: 220,  eur: 250}
-    mac_studio: {jpy: 90000,  usd: 650,  gbp: 550,  eur: 650}
-    imac:       {jpy: 70000,  usd: 500,  gbp: 450,  eur: 500}
+    macbook:    {jpy: 45000,  usd: 300,  gbp: 250,  eur: 300}
+    mac_mini:   {jpy: 25000,  usd: 180,  gbp: 150,  eur: 180}
+    mac_studio: {jpy: 60000,  usd: 450,  gbp: 350,  eur: 450}
+    imac:       {jpy: 50000,  usd: 380,  gbp: 300,  eur: 380}
     mac_pro:    {jpy: 250000, usd: 1800, gbp: 1500, eur: 1800}
-    display:    {jpy: 70000,  usd: 500,  gbp: 450,  eur: 500}
-    ipad_pro:   {jpy: 45000,  usd: 320,  gbp: 280,  eur: 320}
-    ipad_air:   {jpy: 40000,  usd: 300,  gbp: 260,  eur: 300}
+    display:    {jpy: 50000,  usd: 380,  gbp: 300,  eur: 380}
   # How many promising listings to open fully each scan to hunt for a battery
   # cycle count in the description (slower, so capped).
   max_detail_fetch: 12
+  max_detail_fetch_per_source: 3
+  # Quick/partially blocked scans merge these last-good results instead of
+  # making whole marketplaces disappear from the dashboard.
+  snapshot_max_age_minutes: 360
   # Watch mode runs TWO cadences so you hear about deals fast without
   # hammering the slow browser-based sources:
   #   - a FULL scan (all sources) every watch_interval_minutes;
@@ -304,7 +284,7 @@ scan:
   # Quick-pass sources: cheap HTTP/API scans only (the expanded query list
   # makes a full eBay site pass ~1-2 min, so the quick pass sticks to the
   # fastest high-churn markets; everything else refreshes on the full scan).
-  fast_sources: [mercari, ebay_uk, gumtree]
+  fast_sources: [mercari, ebay_uk]
 
 filters:
   # A listing containing any of these is skipped (junk / parts / box-only traps).
@@ -369,6 +349,13 @@ filters:
     - "display panel"
     - "screen only"
     - "display only"
+    - "display chassis"
+    - "rear shell"
+    - "rear housing"
+    - "ssd expansion card"
+    - "ssd expansion module"
+    - "nvme enclosure"
+    - "expansion tower"
     - "palmrest"
     - "palm rest"
     - "logic board"
@@ -397,13 +384,9 @@ filters:
     - "icloud lock"
     - "mdm"
     - "demo unit"         # often DEP/MDM-enrolled corporate demo stock
-    # iPad / display accessory traps
+    # Display accessory traps
     - "pencil only"
     - "ペンシルのみ"      # (Apple) Pencil only
-    - "for ipad"          # accessories: "Case/Keyboard for iPad Pro"
-    - "für ipad"          # ...and the German equivalents (eBay DE)
-    - "für das ipad"
-    - "für apple ipad"
     - "für macbook"
     - "stand only"
     - "スタンドのみ"      # stand only
@@ -454,7 +437,7 @@ models:
   - {id: m4max-16,  chip: M4 MAX, size: 16, uk_avg_gbp: 2501, uk_used_gbp: 2800, base_spec: "36GB/1TB",
      ebay_query: "MacBook Pro 16 M4 Max -case -cover -box -faulty -spares -repair -damaged"}
 
-  - {id: m5-14,     chip: M5,     size: 14, uk_avg_gbp: 1350, base_spec: "16GB/512GB-1TB",
+  - {id: m5-14,     chip: M5,     size: 14, uk_avg_gbp: 1350, base_spec: "16GB/1TB",
      ebay_query: "MacBook Pro 14 M5 -Pro -Max -case -cover -box -faulty -spares -repair -damaged"}
   - {id: m5pro-14,  chip: M5 PRO, size: 14, uk_avg_gbp: 1760, uk_used_gbp: 1180, base_spec: "24GB/1TB",
      ebay_query: "MacBook Pro 14 M5 Pro -case -cover -box -faulty -spares -repair -damaged"}
@@ -507,29 +490,3 @@ models:
   # treat a cheap one of those as a bonus, the benchmark is the base model.
   - {id: studio-display, family: display, uk_avg_gbp: 975, base_spec: "27-inch",
      ebay_query: "Apple Studio Display -mount -arm -stand only -faulty -cracked -spares -repair"}
-
-  # ---- iPad Pro (M2 Oct 2022, M4 May 2024, M5 Oct 2025) --------------------
-  - {id: ipadpro-m2-11,  family: ipad_pro, chip: M2, size: 11,   uk_avg_gbp: 645, uk_used_gbp: 422,  base_spec: "8GB/128GB",
-     ebay_query: "iPad Pro 11 M2 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadpro-m2-129, family: ipad_pro, chip: M2, size: 12.9, uk_avg_gbp: 700, uk_used_gbp: 478,  base_spec: "8GB/128GB",
-     ebay_query: "iPad Pro 12.9 M2 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadpro-m4-11,  family: ipad_pro, chip: M4, size: 11,   uk_avg_gbp: 890, uk_used_gbp: 608,  base_spec: "8GB/256GB",
-     ebay_query: "iPad Pro 11 M4 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadpro-m4-13,  family: ipad_pro, chip: M4, size: 13,   uk_avg_gbp: 919, uk_used_gbp: 700, base_spec: "8GB/256GB",
-     ebay_query: "iPad Pro 13 M4 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadpro-m5-11,  family: ipad_pro, chip: M5, size: 11,   uk_avg_gbp: 830, uk_used_gbp: 750,  base_spec: "12GB/256GB",
-     ebay_query: "iPad Pro 11 M5 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadpro-m5-13,  family: ipad_pro, chip: M5, size: 13,   uk_avg_gbp: 1080, uk_used_gbp: 925, base_spec: "12GB/256GB",
-     ebay_query: "iPad Pro 13 M5 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-
-  # ---- iPad Air (only models whose near-new average clears ~£500) ---------
-  # (11" M2/M3 Airs average ~£430-480 near-new - under the bar, so left out.
-  #  Add them here any time if you want them anyway.)
-  - {id: ipadair-m2-13, family: ipad_air, chip: M2, size: 13, uk_avg_gbp: 510, uk_used_gbp: 450, base_spec: "8GB/128GB",
-     ebay_query: "iPad Air 13 M2 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadair-m3-13, family: ipad_air, chip: M3, size: 13, uk_avg_gbp: 613, uk_used_gbp: 500, base_spec: "8GB/128GB",
-     ebay_query: "iPad Air 13 M3 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadair-m4-11, family: ipad_air, chip: M4, size: 11, uk_avg_gbp: 545, uk_used_gbp: 456, base_spec: "12GB/128GB",
-     ebay_query: "iPad Air 11 M4 -case -keyboard -pencil -faulty -cracked -spares -repair"}
-  - {id: ipadair-m4-13, family: ipad_air, chip: M4, size: 13, uk_avg_gbp: 680, uk_used_gbp: 580, base_spec: "12GB/128GB",
-     ebay_query: "iPad Air 13 M4 -case -keyboard -pencil -faulty -cracked -spares -repair"}

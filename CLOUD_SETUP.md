@@ -1,8 +1,9 @@
 # Running the bot in the cloud — free, 24/7, not on your computer
 
 This sets the bot up to scan **automatically on GitHub's servers** every 20
-minutes, **WhatsApp you** when a qualifying deal appears (UK/US 35%+, JP 50%+
-savings on landed cost), and publish the **dashboard as a website** you can
+minutes, **WhatsApp you** when a qualifying deal appears (35%+ below the
+condition/spec-aware expected UK price, with landed costs included), and
+publish the **dashboard as a website** you can
 open from any device — phone, work computer, anywhere:
 
 ```
@@ -155,10 +156,9 @@ data-centre addresses than toward home broadband:
 - **Buyee (Yahoo + Rakuma + PayPay) may get blocked** from GitHub's address
   ranges. If so, those sources just log a failure and are skipped — the
   scan still completes and still alerts on whatever works.
-- **Swappa, Craigslist and Gumtree don't run in the cloud** — Swappa needs
-  a real Chrome on a home connection, and the classifieds sites block/
-  rate-limit datacenter addresses — so the workflow doesn't try them. Your
-  local scans still cover all three.
+- **Swappa and Gumtree don't run in the cloud** — Swappa needs a real Chrome
+  on a home connection, and Gumtree rate-limits datacenter addresses — so the
+  workflow doesn't try them. Your local scans still cover both.
 
 **The test run in Step 6 tells you which sources work — read the log.** To
 silence sources that always fail in the cloud, add a repository *Variable*

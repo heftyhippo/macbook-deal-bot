@@ -9,8 +9,6 @@ Families covered (all 2022-or-later Apple models):
   imac        iMac 24" (M3 / M4)
   mac_pro     Mac Pro (M2 Ultra)
   display     Apple Studio Display
-  ipad_pro    iPad Pro (M2 / M4 / M5)
-  ipad_air    iPad Air (M2 / M3 / M4 - only the models averaging over ~£500)
 """
 from __future__ import annotations
 
@@ -27,10 +25,10 @@ import requests
 
 SOURCE_CURRENCY = {"mercari": "JPY", "yahoo": "JPY", "rakuma": "JPY",
                    "paypay": "JPY", "ebay_us": "USD", "swappa": "USD",
-                   "craigslist": "USD", "ebay_uk": "GBP", "gumtree": "GBP",
+                   "ebay_uk": "GBP", "gumtree": "GBP",
                    "ebay_de": "EUR"}
 JP_SOURCES = {"mercari", "yahoo", "rakuma", "paypay"}
-US_SOURCES = {"ebay_us", "swappa", "craigslist"}
+US_SOURCES = {"ebay_us", "swappa"}
 UK_SOURCES = {"ebay_uk", "gumtree"}
 EU_SOURCES = {"ebay_de"}
 
@@ -38,11 +36,11 @@ CURRENCY_SYMBOL = {"JPY": "¥", "USD": "$", "GBP": "£", "EUR": "€"}
 
 # alert thresholds are per REGION (JP prices genuinely run lower, so its bar
 # is higher) and split by whether the product carries a keyboard - a JIS
-# keyboard hurts UK resale on a MacBook/iMac, but a Mac mini or iPad from
+# keyboard hurts UK resale on a MacBook/iMac, but a Mac mini from
 # Japan is the same product you'd buy here (see alerts.* in config.yaml)
 REGION_OF_SOURCE = {"mercari": "jp", "yahoo": "jp", "rakuma": "jp",
                     "paypay": "jp", "ebay_us": "us", "swappa": "us",
-                    "craigslist": "us", "ebay_uk": "uk", "gumtree": "uk",
+                    "ebay_uk": "uk", "gumtree": "uk",
                     "ebay_de": "eu"}
 
 # families whose box includes a keyboard (iMac ships with a Magic Keyboard)
@@ -50,8 +48,7 @@ KEYBOARD_FAMILIES = {"macbook", "imac"}
 
 FAMILY_NAME = {"macbook": "MacBook Pro", "mac_mini": "Mac mini",
                "mac_studio": "Mac Studio", "imac": "iMac 24\"",
-               "mac_pro": "Mac Pro", "display": "Studio Display",
-               "ipad_pro": "iPad Pro", "ipad_air": "iPad Air"}
+               "mac_pro": "Mac Pro", "display": "Studio Display"}
 
 _THRESHOLD_DEFAULTS = {
     True:  {"uk": {"min": 35, "hot": 40, "too_good": 50},    # with keyboard
@@ -75,14 +72,23 @@ def alert_thresholds(cfg: dict, source: str, family: str = "macbook") -> dict:
     bar - a JIS/QWERTZ keyboard is a real resale handicap; keyboardless
     products only pay a small forwarding-hassle premium)."""
     a = cfg.get("alerts", {})
+    # The current scoring model already prices keyboard layout, condition and
+    # import friction into one expected-price comparison.  When the flat keys
+    # are present they are therefore the one alert bar everywhere.  Keep the
+    # older regional tables as a backwards-compatible fallback for existing
+    # configs that have not moved to the unified model yet.
+    flat = (("min_savings_pct", "min"),
+            ("hot_savings_pct", "hot"),
+            ("too_good_pct", "too_good"))
+    if any(old in a for old, _ in flat):
+        base = {"min": 35.0, "hot": 40.0, "too_good": 55.0}
+        for old, new in flat:
+            if old in a:
+                base[new] = float(a[old])
+        return base
     reg = region_of(source)
     kb = family in KEYBOARD_FAMILIES
     base = dict(_THRESHOLD_DEFAULTS[kb][reg])
-    # legacy flat keys (pre-regional configs) apply to every region
-    for old, new in (("min_savings_pct", "min"), ("hot_savings_pct", "hot"),
-                     ("too_good_pct", "too_good")):
-        if old in a:
-            base[new] = float(a[old])
     table = a.get("regions" if kb else "regions_no_keyboard") or {}
     # keyboardless table falls back to the keyboarded one for regions it
     # doesn't override (uk/us are usually identical)
@@ -123,6 +129,8 @@ class Listing:
                                # "good" (light wear - only if value tier on)
     url: str = ""              # original marketplace URL
     buyee_path: str = ""       # exact Buyee item URL captured while scraping
+    description: str = ""      # search-card/detail description when available
+    location: str = ""         # useful for collection-only classifieds
     # filled in during analysis:
     family: str = ""           # product family (see FAMILY_NAME)
     model_id: Optional[str] = None
@@ -137,6 +145,13 @@ class Listing:
     landed_gbp: float = 0.0
     uk_avg_gbp: float = 0.0
     savings_pct: float = 0.0
+    expected_price_gbp: float = 0.0  # canonical UK value for exact condition/spec
+    expected_price_basis: str = ""
+    savings_gbp: float = 0.0
+    benchmark_confidence: float = 0.0  # 0..1, quality of the expected-price evidence
+    listing_confidence: float = 0.0    # 0..1, match/buyability confidence
+    overall_score: float = 0.0         # 0..100 confidence-weighted deal score
+    snapshot_age_minutes: int = 0      # >0 when retained from a previous source scan
     # condition-aware analysis:
     uk_used_gbp: float = 0.0        # eBay-UK sold median for USED units
     fair_gbp: float = 0.0           # fair UK value for THIS condition
@@ -163,7 +178,7 @@ class Listing:
             return links
         label = {"ebay_us": "eBay US", "swappa": "Swappa",
                  "ebay_uk": "eBay UK", "ebay_de": "eBay DE",
-                 "craigslist": "Craigslist", "gumtree": "Gumtree",
+                 "gumtree": "Gumtree",
                  }.get(self.source, "Listing")
         return [(label, self.original_url)]
 
@@ -218,11 +233,11 @@ class Listing:
 # Title normalisation + family / model detection
 # ----------------------------------------------------------------------------
 
-# 256/512 are deliberately NOT here even though huge Mac Studio/Pro RAM
-# configs exist - a bare "512GB" in a title is storage 99% of the time
-RAM_SIZES = {8, 16, 18, 24, 32, 36, 48, 64, 96, 128, 192}
-MAC_STORAGE_SIZES = {256, 512}
-IPAD_STORAGE_SIZES = {128, 256, 512}
+# Bare 256/512GB values still mean storage, but explicitly labelled
+# "512GB unified memory" is valid on a current Mac Studio.  The parser below
+# handles those high-memory values only when RAM/memory context is present.
+RAM_SIZES = {8, 16, 18, 24, 32, 36, 48, 64, 96, 128, 192, 256, 512}
+MAC_STORAGE_SIZES = {256, 512, 1024, 2048, 4096, 8192, 16384}
 
 def normalise(text: str) -> str:
     """Full-width -> half-width, uppercase, katakana product words -> latin."""
@@ -231,7 +246,6 @@ def normalise(text: str) -> str:
     t = (t.replace("プロ", " PRO ").replace("マックス", " MAX ")
           .replace("ウルトラ", " ULTRA ").replace("スタジオ", " STUDIO ")
           .replace("ミニ", " MINI ").replace("アイパッド", " IPAD ")
-          .replace("エアー", " AIR ").replace("エア", " AIR ")
           .replace("ディスプレイ", " DISPLAY "))
     t = t.replace("インチ", "INCH").replace("型", "INCH")
     return re.sub(r"\s+", " ", t)
@@ -247,50 +261,97 @@ FAMILY_CHIPS = {
     "imac":       {"M3", "M4"},
     "mac_pro":    {"M2 ULTRA"},
     "display":    set(),           # Studio Display has no M chip
-    "ipad_pro":   {"M2", "M4", "M5"},
-    "ipad_air":   {"M2", "M3", "M4"},
 }
 
 CHIP_RE = re.compile(r"\bM([1-5])\s*[-/]?\s*(PRO|MAX|ULTRA)?\b")
 
 
-# a title that STARTS with an accessory name is selling the accessory, not
-# the device ("Apple Magic Keyboard 13 Zoll iPad Air (M2)...", "Hülle für
-# iPad Pro", "Smart Folio..."). Titles that merely mention one ("iPad Pro M4
-# + Magic Keyboard") are bundles and stay in.
+# A title that starts with an accessory/part name is selling that item, not a
+# complete Mac or Studio Display.  This is deliberately multilingual because
+# the same parser protects every marketplace.
 _ACCESSORY_LEAD_RE = re.compile(
     r"^\W*(?:APPLE\s+)?(?:MAGIC\s+)?(?:KEYBOARD|TASTATUR|CLAVIER|PENCIL|"
-    r"SMART\s+FOLIO|FOLIO|CASE|COVER|HÜLLE|SLEEVE|SKIN|STAND|DOCK|MOUSE|"
-    r"TRACKPAD|CHARGER|NETZTEIL|LADEGERÄT)\b")
+    r"SMART\s+FOLIO|FOLIO|CASE|COVER|HÜLLE|SLEEVE|SKIN|STAND|DOCK|HUB|"
+    r"ENCLOSURE|HOUSING|MOUNT|ADAPTER|MOUSE|TRACKPAD|CHARGER|NETZTEIL|"
+    r"LADEGERÄT|CHASSIS|SHELL|LOGIC\s*BOARD|MOTHERBOARD|DISPLAY\s+ASSEMBLY|"
+    r"SCREEN\s+ASSEMBLY|SSD\s+(?:EXPANSION\s+)?(?:CARD|MODULE|BOARD))\b")
 
-# iPad/display listings that are really an ACCESSORY named after the device
-# ("11インチiPad Pro（M5）用Magic Keyboard", "Logitech Combo Touch iPad Air
-# 13 Keyboard Case", "Bosstab floor stand iPad Pro 13") - an accessory noun
-# with NO bundle marker means the accessory IS the item. Bundles ("iPad Pro
-# + Magic Keyboard", "128GB／Apple Pencil付", "ケース付き") stay in.
-_ACC_NOUN_IPAD_RE = re.compile(
-    r"MAGIC\s*KEYBOARD|SMART\s*KEYBOARD|KEYBOARD\s*(?:CASE|COVER|FOLIO)|"
-    r"COMBO\s*TOUCH|APPLE\s*PENCIL|SMART\s*(?:FOLIO|COVER)|SCREEN\s*PROTECT|"
-    r"\bSTAND\b|TRACKPAD|キーボード|ペンシル|ケース|カバー|フィルム|"
-    r"スタンド|フォリオ|充電器")
+# Product-name-first titles can still be parts: "Studio Display rear shell"
+# and "Mac mini SSD expansion card" were both observed in live top results.
 _ACC_NOUN_DISPLAY_RE = re.compile(
     r"FLOOR\s*STAND|DESK\s*STAND|WALL\s*MOUNT|VESA|MOUNT\s*ADAPTER|"
-    r"スタンドのみ|マウント")
+    r"REAR\s*(?:SHELL|CASE|HOUSING)|CHASSIS|HOUSING|SHELL|CASE|COVER|"
+    r"DISPLAY\s*ASSEMBLY|SCREEN\s*ASSEMBLY|LCD\s*PANEL|GLASS\s*PANEL|"
+    r"LOGIC\s*BOARD|CAMERA\s*MODULE|POWER\s*SUPPLY|CABLE|"
+    r"スタンドのみ|マウント|筐体|外装|部品")
+_ACC_NOUN_DESKTOP_RE = re.compile(
+    r"\b(?:DOCK(?:ING\s+STATION)?|HUB|ENCLOSURE|HOUSING|CASE|SHELL|"
+    r"CHASSIS|DESK\s*STAND|WALL\s*MOUNT|VESA\s*MOUNT|MOUNTING\s*BRACKET|"
+    r"EXPANSION\s+(?:CARD|MODULE|BOARD|TOWER)|SSD\s+(?:EXPANSION\s+)?"
+    r"(?:CARD|MODULE|BOARD|ENCLOSURE|ADAPTER)|NVME\s+(?:ENCLOSURE|DOCK)|"
+    r"LOGIC\s*BOARD|MOTHERBOARD|POWER\s*SUPPLY)\b|"
+    r"内蔵SSD拡張カード|SSD拡張|拡張タワー|外付け|筐体|ケース|"
+    r"ドック(?:ステーション)?|エンクロージャー|冷却ファン|ハブ")
+_ACC_NOUN_MACBOOK_RE = re.compile(
+    r"\b(?:TOP\s*CASE|BOTTOM\s*CASE|PALM\s*REST|DISPLAY\s*ASSEMBLY|"
+    r"SCREEN\s*ASSEMBLY|LCD\s*PANEL|LOGIC\s*BOARD|MOTHERBOARD|"
+    r"REPLACEMENT\s+(?:SCREEN|BATTERY|KEYBOARD)|BATTERY\s+ONLY|"
+    r"KEYBOARD\s+ONLY|TRACKPAD\s+ONLY|CHASSIS|HOUSING|SHELL)\b|"
+    r"液晶パネル|ロジックボード|マザーボード|部品|交換用|修理用")
 _BUNDLE_MARK_RE = re.compile(
     r"セット|付き|付属|付|同梱|おまけ|本体|INCLUDED|INCLUDES|\bWITH\b|"
     r"[＋+＆&]")
+_LEGACY_MAC_RE = re.compile(
+    r"\bINTEL\b|\bCORE\s*I[3579]\b|\b(?:EARLY|MID|LATE)\s*20(?:0\d|1\d|2[01])\b")
+_CURRENT_DISPLAY_RE = re.compile(
+    r"\bAPPLE\s+STUDIO\s+DISPLAY\b|\bA2525\b|\b5K\b|"
+    r"(?:\b27(?:[.]0)?\s*(?:INCH|[\"”])?.{0,24}\bSTUDIO\s+DISPLAY\b|"
+    r"\bSTUDIO\s+DISPLAY\b.{0,24}\b27(?:[.]0)?\s*(?:INCH|[\"”])?)")
+_LEGACY_DISPLAY_RE = re.compile(
+    r"\bVINTAGE\b|\bPOWER\s+MAC\b|\bG4\b|\bM4551\b|\bM7768\b|"
+    r"\b(?:15|17|20|21|23)\s*(?:INCH|[\"”])")
 
 
 def _is_accessory_only(t: str, fam: str) -> bool:
-    """True when an iPad/display-family title is selling an accessory rather
-    than the device (accessory noun present, no bundle marker)."""
-    if fam in ("ipad_pro", "ipad_air"):
-        rx = _ACC_NOUN_IPAD_RE
-    elif fam == "display":
+    """True when a title is selling a part/accessory rather than a device.
+
+    A bundle marker keeps a real computer sold *with* an accessory only when
+    the marker appears before the accessory noun.  If the accessory is named
+    first ("dock with Mac mini compatibility"), the accessory is the item.
+    """
+    if fam == "display":
         rx = _ACC_NOUN_DISPLAY_RE
+    elif fam in ("mac_mini", "mac_studio", "mac_pro", "imac"):
+        rx = _ACC_NOUN_DESKTOP_RE
+    elif fam == "macbook":
+        rx = _ACC_NOUN_MACBOOK_RE
     else:
-        return False    # MacBook/iMac titles legitimately mention keyboards
-    return bool(rx.search(t)) and not _BUNDLE_MARK_RE.search(t)
+        return False
+    match = rx.search(t)
+    if not match:
+        return False
+    bundle = _BUNDLE_MARK_RE.search(t)
+    return not bundle or bundle.start() > match.start()
+
+
+def is_complete_apple_product(title: str, family: str = "") -> bool:
+    """Return whether a title describes a complete tracked Apple device.
+
+    This public gate is used for both fresh and cached listings so a stale
+    accessory can never survive merely because an earlier parser accepted it.
+    """
+    t = normalise(title)
+    fam = family or _detect_family(t)
+    if not fam or fam not in FAMILY_CHIPS:
+        return False
+    if _ACCESSORY_LEAD_RE.search(t) or _is_accessory_only(t, fam):
+        return False
+    if fam != "display" and _LEGACY_MAC_RE.search(t):
+        return False
+    if fam == "display":
+        return bool(_CURRENT_DISPLAY_RE.search(t)
+                    and not _LEGACY_DISPLAY_RE.search(t))
+    return True
 
 
 def _detect_family(t: str) -> str:
@@ -310,27 +371,35 @@ def _detect_family(t: str) -> str:
         return "imac"
     if re.search(r"\bMAC\s*PRO\b", t):
         return "mac_pro"
-    if "IPAD PRO" in t:
-        return "ipad_pro"
-    if "IPAD AIR" in t:
-        return "ipad_air"
     return ""
-
-
-# JP sellers state iPad generations instead of chips: map the 2022 M2 gens
-_IPAD_GEN_M2 = re.compile(r"第\s*([46])\s*世代")
 
 
 def parse_listing_specs(listing: Listing) -> None:
     """Fill family / chip / size / ram / storage / keyboard in place.
     A listing that doesn't parse to a tracked family keeps family='' and is
     dropped by the caller."""
-    t = normalise(listing.title)
+    # A last-good snapshot may have been parsed by an older release. Reset the
+    # derived identity fields so revalidation cannot retain a stale match.
+    listing.family = ""
+    listing.model_id = None
+    listing.model_label = ""
+    listing.chip = ""
+    listing.size = None
+    listing.size_guessed = False
+    listing.ram_gb = None
+    listing.storage_gb = None
+    listing.spec_adj_gbp = 0.0
+    title_t = normalise(listing.title)
+    # Search-result descriptions are especially useful on classifieds, where
+    # sellers often put the exact memory/storage/condition below a terse title.
+    # Family/accessory detection remains title-only so a comparison phrase in
+    # the description cannot turn one product into another.
+    t = normalise(" ".join(x for x in (listing.title, listing.description) if x))
 
-    fam = _detect_family(t)
+    fam = _detect_family(title_t)
     if not fam:
         return
-    if _is_accessory_only(t, fam):
+    if not is_complete_apple_product(listing.title, fam):
         return    # a keyboard/case/pencil/stand named after the device
 
     # --- chip --------------------------------------------------------------
@@ -338,10 +407,6 @@ def parse_listing_specs(listing: Listing) -> None:
     m = CHIP_RE.search(t)
     if m:
         chip = f"M{m.group(1)} {m.group(2) or ''}".strip()
-    if fam == "ipad_pro" and not m:
-        g = _IPAD_GEN_M2.search(listing.title)
-        if g:                       # 11" 第4世代 / 12.9" 第6世代 = M2 (2022)
-            chip = "M2"
     if fam == "display":
         chip = ""                   # no chip - and none required
     elif chip not in FAMILY_CHIPS[fam]:
@@ -351,20 +416,26 @@ def parse_listing_specs(listing: Listing) -> None:
 
     # --- RAM / storage (strip them out before looking for sizes) ------------
     storage_gb = None
-    tb = re.search(r"\b([1248])\s*TB\b", t)
+    tb = re.search(r"\b(1|2|4|8|16)\s*TB\b", t)
     if tb:
         storage_gb = int(tb.group(1)) * 1024
     gb_values = [int(x) for x in re.findall(r"\b(\d{2,4})\s*GB\b", t)]
     ram = None
-    stor_set = IPAD_STORAGE_SIZES if fam.startswith("ipad") else MAC_STORAGE_SIZES
+    # Context wins for unusually large unified-memory configurations.
+    rm = (re.search(r"\b(\d{1,3})\s*GB\s+(?:UNIFIED\s+)?(?:RAM|MEMORY)\b", t)
+          or re.search(r"\b(?:RAM|MEMORY)\s*[:=-]?\s*(\d{1,3})\s*GB\b", t))
+    if rm and int(rm.group(1)) in RAM_SIZES:
+        ram = int(rm.group(1))
+    sm = (re.search(r"\b(\d{2,5})\s*GB\s+(?:SSD|STORAGE|DRIVE)\b", t)
+          or re.search(r"\b(?:SSD|STORAGE)\s*[:=-]?\s*(\d{2,5})\s*GB\b", t))
+    if sm and int(sm.group(1)) in MAC_STORAGE_SIZES:
+        storage_gb = int(sm.group(1))
     for v in gb_values:
-        if fam.startswith("ipad") or fam == "display":
-            # iPad titles never state RAM - every GB figure is storage
-            if v in IPAD_STORAGE_SIZES and storage_gb is None:
-                storage_gb = v
-        elif v in RAM_SIZES and ram is None:
+        if fam == "display":
+            continue
+        if v in RAM_SIZES and v not in (256, 512) and ram is None:
             ram = v
-        elif v in stor_set and storage_gb is None:
+        elif v in MAC_STORAGE_SIZES and storage_gb is None:
             storage_gb = v
     listing.ram_gb = ram
     listing.storage_gb = storage_gb
@@ -384,26 +455,10 @@ def parse_listing_specs(listing: Listing) -> None:
             if re.search(r"(?<!\d)(13|15)(?:[.]\d)?\s*(?:INCH|[\"”])", t_nosizes):
                 listing.family = listing.chip = ""
                 return
-            listing.size = 14      # conservative default: the cheaper size
+            listing.size = None    # choose the lowest compatible benchmark later
             listing.size_guessed = True
     elif fam == "imac":
         listing.size = 24          # every Apple-silicon iMac is 24"
-    elif fam in ("ipad_pro", "ipad_air"):
-        if re.search(r"(?<!\d)12[.,]9(?!\d)", t_nosizes):
-            listing.size = 12.9
-        else:
-            s = re.search(r"(?<!\d)(11|13)(?!\d)", t_nosizes)
-            if s:
-                listing.size = float(s.group(1))
-            else:
-                listing.size = 11.0    # conservative default: the smaller iPad
-                listing.size_guessed = True
-        # generation naming: the M2 big iPad Pro is "12.9", the M4/M5 one "13"
-        if fam == "ipad_pro":
-            if listing.chip == "M2" and listing.size == 13:
-                listing.size = 12.9
-            elif listing.chip in ("M4", "M5") and listing.size == 12.9:
-                listing.size = 13.0
     # mac_mini / mac_studio / mac_pro / display have no size dimension
 
     # --- keyboard layout (only meaningful when a keyboard is in the box) -----
@@ -418,16 +473,38 @@ def parse_listing_specs(listing: Listing) -> None:
     else:
         listing.keyboard = "n/a"       # no keyboard in the box
 
-    # cellular iPads are worth a little more - surface it
-    if fam.startswith("ipad") and re.search(r"CELLULAR|セルラー|WI-?FI\s*\+", t):
-        listing.flags.append("cellular model (worth a little more)")
-
     # sellers often put the battery cycle count right in the title
     if listing.cycles is None and fam == "macbook":
-        listing.cycles = find_cycle_count(listing.title)
+        listing.cycles = find_cycle_count(t)
 
 
 _BASE_SPEC_RE = re.compile(r"(\d+)\s*GB.*?/\s*(\d+)\s*(GB|TB)")
+
+
+def _capacity_value(capacity: int, table: dict[int, float]) -> float:
+    """Return a monotonic value for an SSD capacity map.
+
+    Exact configured values win.  Missing capacities are linearly
+    interpolated (or extrapolated from the nearest two points) instead of
+    silently becoming zero, which used to make an 8TB machine worth *less*
+    than its base configuration.
+    """
+    if capacity in table:
+        return table[capacity]
+    points = sorted(table)
+    if not points:
+        return 0.0
+    if len(points) == 1:
+        return table[points[0]]
+    if capacity < points[0]:
+        lo, hi = points[0], points[1]
+    elif capacity > points[-1]:
+        lo, hi = points[-2], points[-1]
+    else:
+        hi = next(p for p in points if p > capacity)
+        lo = points[points.index(hi) - 1]
+    span = hi - lo
+    return table[lo] + (capacity - lo) / span * (table[hi] - table[lo])
 
 
 def _spec_adjust_gbp(listing: Listing, mdl: dict, cfg: Optional[dict]) -> float:
@@ -451,8 +528,8 @@ def _spec_adjust_gbp(listing: Listing, mdl: dict, cfg: Optional[dict]) -> float:
         adj += (listing.ram_gb - base_ram) / 8.0 * per8
     ssd_map = {int(k): float(v) for k, v in (sa.get("ssd_gbp") or {}).items()}
     if listing.storage_gb and ssd_map:
-        adj += (ssd_map.get(listing.storage_gb, 0.0)
-                - ssd_map.get(base_ssd, 0.0))
+        adj += (_capacity_value(listing.storage_gb, ssd_map)
+                - _capacity_value(base_ssd, ssd_map))
     new = float(mdl["uk_avg_gbp"])
     return round(min(max(adj, -0.15 * new), 0.60 * new), 2)
 
@@ -461,18 +538,28 @@ def match_model(listing: Listing, models: list[dict],
                 cfg: Optional[dict] = None) -> None:
     """Attach the matching config model (family + chip + size) to the listing,
     with the benchmark adjusted for the listing's RAM/SSD spec when cfg given."""
+    candidates = []
     for mdl in models:
         if mdl.get("family", "macbook") != (listing.family or "macbook"):
             continue
         if str(mdl.get("chip", "")).upper() != listing.chip:
             continue
-        if "size" in mdl and (listing.size is None
-                              or float(mdl["size"]) != float(listing.size)):
+        if ("size" in mdl and listing.size is not None
+                and float(mdl["size"]) != float(listing.size)):
             continue
+        candidates.append(mdl)
+    if listing.size is None:
+        # An unknown size must never inherit whichever model happened to be
+        # first in config.  Use the lowest compatible benchmark so uncertainty
+        # cannot manufacture a bargain.
+        candidates.sort(key=lambda m: float(m.get("uk_avg_gbp", 0)))
+    for mdl in candidates:
         listing.model_id = mdl["id"]
         fam_name = FAMILY_NAME.get(listing.family, "")
         size_str = ""
-        if "size" in mdl and listing.family in ("macbook", "ipad_pro", "ipad_air"):
+        if listing.size is None and "size" in mdl:
+            size_str = " (size unconfirmed)"
+        elif "size" in mdl and listing.family == "macbook":
             size_str = f' {mdl["size"]}"'
         listing.model_label = (mdl.get("label")
                                or f"{fam_name} {listing.chip}{size_str}".strip())
@@ -499,7 +586,7 @@ def is_excluded(title: str, exclude_keywords: list[str]) -> Optional[str]:
     return None
 
 
-# classifieds sites (gumtree/craigslist) are full of "wanted"/"we buy" ads -
+# Classifieds sites are full of "wanted"/"we buy" ads -
 # they look like listings but there's nothing to buy
 CLASSIFIED_AD_RE = re.compile(
     r"\bwanted\b|\bwtb\b|we\s*buy|i\s*buy|buying\b|sell\s*your|cash\s*for|"
@@ -538,17 +625,14 @@ def get_fx(fx_cfg: dict) -> tuple[dict, str]:
 # Landed cost + scoring
 # ----------------------------------------------------------------------------
 
-# default international shipping by family - a boxed iPad posts for a
-# fraction of what a 27" glass display costs to courier safely
+# Default international shipping by family. A compact desktop posts for a
+# fraction of what a 27" glass display costs to courier safely.
 _INTL_JPY_DEFAULT = {"macbook": 8000, "mac_mini": 6000, "mac_studio": 12000,
-                     "imac": 20000, "mac_pro": 30000, "display": 25000,
-                     "ipad_pro": 4500, "ipad_air": 4500}
+                     "imac": 20000, "mac_pro": 30000, "display": 25000}
 _INTL_USD_DEFAULT = {"macbook": 85, "mac_mini": 60, "mac_studio": 110,
-                     "imac": 180, "mac_pro": 250, "display": 200,
-                     "ipad_pro": 45, "ipad_air": 45}
+                     "imac": 180, "mac_pro": 250, "display": 200}
 _EU_EUR_DEFAULT = {"macbook": 30, "mac_mini": 25, "mac_studio": 45,
-                   "imac": 70, "mac_pro": 90, "display": 80,
-                   "ipad_pro": 20, "ipad_air": 20}
+                   "imac": 70, "mac_pro": 90, "display": 80}
 
 
 def _family_cost(cfg_map: Optional[dict], defaults: dict, family: str,
@@ -568,8 +652,8 @@ def landed_cost_gbp(price: float, source: str, cfg: dict, rates: dict,
     EU route:     item + shipping to the UK (EUR)
     All three:    x 1.20 UK import VAT (0% duty on computers/tablets)
                   + courier handling.  UK listings just add postage.
-    Shipping scales with the product: an iPad posts cheap, a 27" display
-    doesn't (override per family under costs: in config.yaml).
+    Shipping scales with the product: a Mac mini posts cheaply, a 27" display
+    does not (override per family under costs: in config.yaml).
     """
     c = cfg["costs"]
     fam = family or "macbook"
@@ -602,28 +686,126 @@ def landed_cost_gbp(price: float, source: str, cfg: dict, rates: dict,
     return round(gbp, 2)
 
 
-def fair_value_gbp(listing: Listing, cfg: dict) -> float:
-    """What a UK buyer typically pays for THIS model in THIS condition.
+def _valid_used_benchmark(new: float, used: float) -> bool:
+    """Reject obviously spec-mixed/contaminated sold medians.
 
-    new       -> the model's UK average for new/unused (uk_avg_gbp)
-    like_new  -> midpoint of new and the used median (or x0.88 fallback)
-    good      -> the eBay-UK SOLD median for used units (or x0.78 fallback)
+    Several legacy values were higher than the corresponding new benchmark.
+    Silently clamping them hid the data problem; treating them as sparse data
+    and using the documented fallback is both safer and more transparent.
+    """
+    return bool(new and used and new * 0.50 <= used <= new * 0.95)
+
+
+def expected_price_details(listing: Listing, cfg: dict) -> tuple[float, str, float]:
+    """Return (expected UK price, human-readable basis, confidence 0..1).
+
+    The configured benchmark is already spec-adjusted by ``match_model``.
+    This function then prices the exact condition, keyboard/layout and
+    unusually worn battery.  It is the single benchmark used by the UI,
+    alerts, CSV and WhatsApp.
     """
     v = cfg.get("value", {})
-    new = float(listing.uk_avg_gbp)
+    ep = cfg.get("expected_price", {})
+    new = float(listing.uk_avg_gbp or 0)
     used = float(listing.uk_used_gbp or 0)
-    if used and new:
-        used = min(max(used, new * 0.55), new * 0.92)
-    bucket = {"resale": "new", "personal": "like_new"}.get(listing.grade, "good")
-    if bucket == "new":
-        return new
-    if bucket == "like_new":
-        if used:
-            return round((new + used) / 2, 2)
-        return round(new * float(v.get("like_new_factor", 0.88)), 2)
-    if used:
-        return used
-    return round(new * float(v.get("good_factor", 0.78)), 2)
+    if not new:
+        return 0.0, "no benchmark", 0.0
+    valid_used = _valid_used_benchmark(new, used)
+    blob = normalise(" ".join((listing.title, listing.condition,
+                               listing.description)))
+    conf = float(ep.get("configured_benchmark_confidence", 0.72))
+
+    if listing.grade == "resale":
+        # A result card that combines New/Open box is not proof of sealed
+        # stock.  Price it conservatively until the listing itself says new.
+        open_box = bool(re.search(
+            r"OPEN\s*BOX|NEW\s*OTHER|OPENED|開封|未使用に近い", blob))
+        ambiguous = "NEW / OPEN BOX" in blob
+        factor = float(ep.get("open_box_factor", 0.94)) if open_box else 1.0
+        if ambiguous and not open_box:
+            factor = float(ep.get("ambiguous_new_factor", 0.97))
+            conf -= 0.05
+        price = new * factor
+        basis = "open-box estimate" if factor < 1 else "new/unused benchmark"
+    elif listing.grade == "personal":
+        if valid_used:
+            weight = float(ep.get("like_new_new_weight", 0.50))
+            price = new * weight + used * (1 - weight)
+            basis = "like-new estimate from new + used UK benchmarks"
+            conf += 0.06
+        else:
+            price = new * float(v.get("like_new_factor", 0.88))
+            basis = "like-new estimate (limited sold data)"
+            conf -= 0.12
+    else:
+        if valid_used:
+            price = used
+            basis = "used UK sold benchmark"
+            conf += 0.08
+        else:
+            price = new * float(v.get("good_factor", 0.78))
+            basis = "used estimate (limited sold data)"
+            conf -= 0.15
+
+    # The UK resale value must reflect what is actually in the box.  These
+    # explicit deductions replace the old arbitrary regional alert bars.
+    if listing.family == "macbook":
+        penalties = ep.get("keyboard_penalty_gbp", {})
+        if listing.keyboard == "JIS":
+            price -= float(penalties.get("JIS", 120))
+            basis += "; JIS keyboard adjusted"
+        elif listing.keyboard == "EU":
+            price -= float(penalties.get("EU", 80))
+            basis += "; EU keyboard adjusted"
+        elif listing.keyboard == "unknown" and listing.source in JP_SOURCES:
+            price -= float(penalties.get("unknown_jp", 100))
+            basis += "; likely-JIS keyboard adjusted"
+            conf -= 0.06
+    elif listing.family == "imac":
+        if listing.source in JP_SOURCES | EU_SOURCES:
+            price -= float(ep.get("imac_keyboard_penalty_gbp", 80))
+            basis += "; non-UK keyboard adjusted"
+
+    # Common display variants whose value is stated clearly enough to model
+    # without pretending the base benchmark already includes them.
+    if listing.family == "display":
+        if "NANO" in blob or "NANO-TEXTURE" in blob:
+            price += float(ep.get("studio_display_nano_premium_gbp", 150))
+            basis += "; nano-texture adjusted"
+        if re.search(r"HEIGHT.?ADJUST|高さ調整", blob):
+            price += float(ep.get("studio_display_height_premium_gbp", 150))
+            basis += "; height stand adjusted"
+
+    # Sold prices for each condition already contain typical battery wear.
+    # Only charge for cycles *above* that condition's baseline to avoid
+    # double-counting normal wear.
+    if listing.family == "macbook" and listing.cycles is not None:
+        baseline = {"resale": 10, "personal": 60, "good": 300}.get(
+            listing.grade, 300)
+        extra_cycles = max(0, listing.cycles - baseline)
+        if extra_cycles:
+            rating = float(v.get("battery_cycle_rating", 1000))
+            replacement = float(v.get("battery_replacement_gbp", 249))
+            wear = min(extra_cycles, rating) / rating * replacement
+            price -= wear
+            basis += f"; excess battery wear -£{wear:.0f}"
+
+    if listing.size_guessed:
+        conf -= 0.14
+    if listing.spec_adj_gbp:
+        conf -= 0.04
+    if listing.family != "display":
+        if listing.ram_gb is None:
+            conf -= 0.04
+        if listing.storage_gb is None:
+            conf -= 0.06
+    return round(max(price, new * 0.35), 2), basis, round(
+        min(max(conf, 0.30), 0.92), 2)
+
+
+def fair_value_gbp(listing: Listing, cfg: dict) -> float:
+    """Backward-compatible name for the canonical expected UK price."""
+    return expected_price_details(listing, cfg)[0]
 
 
 def battery_wear_gbp(cycles: Optional[int], cfg: dict) -> float:
@@ -639,25 +821,15 @@ def battery_wear_gbp(cycles: Optional[int], cfg: dict) -> float:
 
 
 def value_score(listing: Listing, cfg: dict) -> None:
-    """Deal quality for the price RELATIVE TO CONDITION: % below the fair
-    UK value for this model in this condition, after adding the pro-rated
-    battery wear cost to the landed price."""
-    listing.fair_gbp = fair_value_gbp(listing, cfg)
-    wear = battery_wear_gbp(listing.cycles, cfg)
-    listing.value_landed_gbp = round(listing.landed_gbp + wear, 2)
-    if wear >= 25:
-        flag = f"battery wear costed in (+£{wear:.0f})"
-        if flag not in listing.flags:
-            listing.flags.append(flag)
-    if listing.fair_gbp:
-        listing.value_pct = round(
-            (listing.fair_gbp - listing.value_landed_gbp)
-            / listing.fair_gbp * 100, 1)
+    """Populate legacy value fields from the one canonical deal metric."""
+    listing.fair_gbp = listing.expected_price_gbp or fair_value_gbp(listing, cfg)
+    listing.value_landed_gbp = listing.landed_gbp
+    listing.value_pct = listing.savings_pct
 
 
 def max_cycles_for(grade: str, cfg: dict) -> int:
     """Battery-cycle ceiling per tier (MacBooks only - desktops have no
-    battery and iPad sellers essentially never state a count)."""
+    battery)."""
     if grade == "personal":
         return int(cfg.get("personal", {}).get("max_battery_cycles", 60))
     if grade == "good":
@@ -672,66 +844,130 @@ def flip_profit_gbp(listing: Listing, cfg: dict) -> tuple[float, float]:
     friction = float(cfg.get("resale", {}).get("sell_friction_pct", 5))
     if not listing.uk_avg_gbp or not listing.landed_gbp:
         return 0.0, 0.0
-    target = (listing.uk_avg_gbp if listing.grade == "resale"
-              else fair_value_gbp(listing, cfg))
+    target = listing.expected_price_gbp or fair_value_gbp(listing, cfg)
     return (round(target * (1 - friction / 100.0) - listing.landed_gbp, 2),
             round(target, 2))
+
+
+_SOURCE_CONFIDENCE = {
+    "ebay_uk": 0.92, "ebay_us": 0.86, "ebay_de": 0.84,
+    "swappa": 0.90, "mercari": 0.84, "rakuma": 0.80,
+    "paypay": 0.80, "yahoo": 0.70, "gumtree": 0.60,
+}
+
+
+def listing_confidence(listing: Listing) -> float:
+    """How trustworthy/buyable this particular result appears (0..1)."""
+    conf = _SOURCE_CONFIDENCE.get(listing.source, 0.65)
+    if listing.is_auction:
+        return 0.05
+    if listing.size_guessed:
+        conf *= 0.78
+    if listing.family not in ("display",) and listing.storage_gb is None:
+        conf *= 0.90
+    if listing.source == "gumtree" and not listing.description:
+        conf *= 0.80
+    joined = " ".join(listing.flags).upper()
+    if "TOO-GOOD" in joined or "SUSPICIOUSLY LOW" in joined:
+        conf *= 0.55
+    if "NOT A WHOLE PRODUCT" in joined:
+        conf *= 0.10
+    if "BATTERY CYCLES" in joined and "> YOUR MAX" in joined:
+        conf *= 0.45
+    return round(min(max(conf, 0.05), 0.98), 2)
 
 
 def score(listing: Listing, cfg: dict, rates: dict) -> None:
     listing.landed_gbp = landed_cost_gbp(listing.price, listing.source, cfg,
                                          rates, listing.family)
-    if listing.uk_avg_gbp:
+    (listing.expected_price_gbp, listing.expected_price_basis,
+     listing.benchmark_confidence) = expected_price_details(listing, cfg)
+    if listing.expected_price_gbp:
+        listing.savings_gbp = round(
+            listing.expected_price_gbp - listing.landed_gbp, 2)
         listing.savings_pct = round(
-            (listing.uk_avg_gbp - listing.landed_gbp) / listing.uk_avg_gbp * 100, 1
+            listing.savings_gbp / listing.expected_price_gbp * 100, 1
         )
-    if listing.grade in ("resale", "personal"):
-        listing.flip_profit_gbp, listing.flip_target_gbp = \
-            flip_profit_gbp(listing, cfg)
+    listing.fair_gbp = listing.expected_price_gbp
+    listing.value_landed_gbp = listing.landed_gbp
+    listing.value_pct = listing.savings_pct
+    listing.flip_profit_gbp, listing.flip_target_gbp = flip_profit_gbp(listing, cfg)
     a = cfg["alerts"]
     # Price-sanity backstop: a whole unit never sells for a small fraction
-    # of its UK value - that's a part or an accessory (iPad keyboard, display
-    # stand, ...) the keyword list didn't catch.
-    floor_ratio = a.get("implausible_price_ratio", 0.30)
+    # of its UK value - that's usually a part, accessory or scam the title
+    # checks did not catch.
+    floor_ratio = float(a.get("implausible_price_ratio", 0.30))
+    hard_floor = float(a.get("hard_exclude_price_ratio", 0.18))
     rate = rates.get(listing.currency)
-    if listing.uk_avg_gbp and rate:
+    if listing.expected_price_gbp and rate:
         bare_gbp = listing.price / rate   # bare item price, no fees
-        if bare_gbp < listing.uk_avg_gbp * floor_ratio:
-            listing.flags.append(
-                "PRICE TOO LOW for a whole unit - likely a part/accessory, not the device")
+        ratio = bare_gbp / listing.expected_price_gbp
+        if ratio < hard_floor:
+            flag = "NOT A WHOLE PRODUCT? price is implausible for the device"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
+        elif ratio < floor_ratio:
+            flag = "SUSPICIOUSLY LOW - verify the exact product, lock status and seller"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
     if listing.spec_adj_gbp:
-        listing.flags.append(
-            f"benchmark spec-adjusted {listing.spec_adj_gbp:+,.0f} GBP")
+        flag = f"benchmark spec-adjusted {listing.spec_adj_gbp:+,.0f} GBP"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
     t = alert_thresholds(cfg, listing.source, listing.family)
     if listing.savings_pct >= t["too_good"]:
-        listing.flags.append("TOO-GOOD? verify carefully (box-only/scam/mislabel risk)")
+        flag = "TOO-GOOD? verify carefully (box-only/scam/mislabel risk)"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
     if listing.is_auction:
-        listing.flags.append("auction - current bid, price can rise")
+        flag = "auction - current bid, price can rise"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
     if listing.best_offer:
-        listing.flags.append("accepts Best Offer - real price may be lower")
+        flag = "accepts Best Offer - real price may be lower"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
     if listing.size_guessed:
-        base = '14"' if listing.family == "macbook" else '11"'
-        listing.flags.append(f"size not stated - assumed {base}")
+        flag = "size not stated - conservative lower benchmark used"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
     # keyboard flags only where a keyboard is actually in the box
     if listing.family == "macbook":
         if listing.keyboard == "JIS":
-            listing.flags.append("JIS (Japanese) keyboard")
+            flag = "JIS (Japanese) keyboard - expected price adjusted"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
         elif listing.keyboard == "EU":
-            listing.flags.append("non-UK European keyboard layout")
+            flag = "non-UK European keyboard - expected price adjusted"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
         elif listing.keyboard == "unknown" and listing.source in JP_SOURCES:
-            listing.flags.append("keyboard layout unknown (likely JIS)")
+            flag = "keyboard unknown (likely JIS) - expected price adjusted"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
         max_cyc = max_cycles_for(listing.grade, cfg)
         if listing.cycles is not None and listing.cycles > max_cyc:
-            listing.flags.append(f"battery cycles {listing.cycles} > your max {max_cyc}")
+            flag = f"battery cycles {listing.cycles} > your max {max_cyc}"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
     elif listing.family == "imac":
         if listing.source in JP_SOURCES:
-            listing.flags.append("bundled JIS keyboard/mouse (UK swap ~£80)")
+            flag = "bundled JIS keyboard/mouse - expected price adjusted"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
         elif listing.source in EU_SOURCES:
-            listing.flags.append("bundled EU-layout keyboard (UK swap ~£80)")
-    if listing.source == "craigslist":
-        listing.flags.append("local pickup/cash - needs a US contact, no buyer protection")
-    elif listing.source == "gumtree":
-        listing.flags.append("classifieds - often collection-only, no buyer protection")
+            flag = "bundled EU-layout keyboard - expected price adjusted"
+            if flag not in listing.flags:
+                listing.flags.append(flag)
+    if listing.source == "gumtree":
+        flag = "classifieds - often collection-only, no buyer protection"
+        if flag not in listing.flags:
+            listing.flags.append(flag)
+    listing.listing_confidence = listing_confidence(listing)
+    saving_component = min(max(listing.savings_pct, 0.0) / 50.0, 1.0)
+    listing.overall_score = round(
+        saving_component * listing.benchmark_confidence
+        * listing.listing_confidence * 100, 1)
 
 
 CYCLE_RE = re.compile(
